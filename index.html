@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Griffin</title>
+    <title>Treadmill Controller — Phoenix</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -63,7 +63,7 @@
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Griffin</h1>
+    <h1>Treadmill Controller — Phoenix</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -100,6 +100,22 @@
 
         function setStatus(message) {
             statusEl.textContent = message;
+        }
+
+        // Bluefy's Web Bluetooth implementation doesn't always reject with a
+        // standard DOMException, so pull out whatever info is actually there
+        // rather than assuming .name/.message exist.
+        function describeError(error) {
+            let text = String(error);
+            try {
+                const keys = Object.getOwnPropertyNames(Object(error));
+                const details = keys
+                    .filter(k => k !== 'stack')
+                    .map(k => `${k}=${JSON.stringify(error[k])}`)
+                    .join(', ');
+                if (details) text += ` (${details})`;
+            } catch (e) { /* ignore, text already has the String() fallback */ }
+            return text;
         }
 
         // iConsole+0168 (JTX Sprint 6) proprietary service — see docs/ble-findings.md.
@@ -151,7 +167,7 @@
                 setConnectButtonState('idle');
                 const message = error && error.name === 'NotFoundError'
                     ? 'No treadmill selected.'
-                    : `Scan failed: ${error.name}: ${error.message}`;
+                    : `Scan failed: ${describeError(error)}`;
                 setStatus(message);
                 announce(message);
                 return;
@@ -167,7 +183,7 @@
             } catch (error) {
                 console.error('gatt.connect failed', error);
                 setConnectButtonState('idle');
-                const message = `Could not connect to ${deviceName}: ${error.name}: ${error.message}`;
+                const message = `Could not connect to ${deviceName}: ${describeError(error)}`;
                 setStatus(message);
                 announce(message);
                 return;
