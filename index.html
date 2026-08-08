@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller</title>
+    <title>Treadmill Controller — Griffin</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -140,30 +140,43 @@
             setConnectButtonState('busy');
             setStatus('Scanning for treadmill…');
             announce('Scanning for treadmill.');
+
             try {
                 device = await navigator.bluetooth.requestDevice({
                     filters: [{ namePrefix: 'iConsole' }],
                     optionalServices: [ICONSOLE_SERVICE_UUID, 0x1826, 0x180a]
                 });
-                const deviceName = device.name || 'treadmill';
-                setStatus(`Found ${deviceName}. Connecting…`);
-                announce(`Found ${deviceName}. Connecting.`);
-                device.addEventListener('gattserverdisconnected', onDisconnected);
-
-                gattServer = await device.gatt.connect();
-
-                setConnectButtonState('connected');
-                modeFieldset.disabled = false;
-                setStatus(`Connected to ${deviceName}. Choose a session mode.`);
-                announce(`Connected to ${deviceName}. Choose a session mode.`);
             } catch (error) {
+                console.error('requestDevice failed', error);
                 setConnectButtonState('idle');
                 const message = error && error.name === 'NotFoundError'
                     ? 'No treadmill selected.'
-                    : 'Connection failed. Please try again.';
+                    : `Scan failed: ${error.name}: ${error.message}`;
                 setStatus(message);
                 announce(message);
+                return;
             }
+
+            const deviceName = device.name || 'treadmill';
+            setStatus(`Found ${deviceName}. Connecting…`);
+            announce(`Found ${deviceName}. Connecting.`);
+            device.addEventListener('gattserverdisconnected', onDisconnected);
+
+            try {
+                gattServer = await device.gatt.connect();
+            } catch (error) {
+                console.error('gatt.connect failed', error);
+                setConnectButtonState('idle');
+                const message = `Could not connect to ${deviceName}: ${error.name}: ${error.message}`;
+                setStatus(message);
+                announce(message);
+                return;
+            }
+
+            setConnectButtonState('connected');
+            modeFieldset.disabled = false;
+            setStatus(`Connected to ${deviceName}. Choose a session mode.`);
+            announce(`Connected to ${deviceName}. Choose a session mode.`);
         });
 
         if (!navigator.bluetooth) {
