@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Cerberus</title>
+    <title>Treadmill Controller — Sphinx</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -96,10 +96,22 @@
             color: #444;
         }
         #shareSessionButton { background: #e6f9ec; }
+        #planFileRow { margin: 10px 0; }
+        #planFileRow label { display: block; font-weight: bold; margin-bottom: 6px; }
+        #planFileRow input[type="file"] { width: 100%; font-size: 1rem; }
+        #planSummary {
+            font-weight: bold;
+            text-align: center;
+            margin: 10px 0;
+            padding: 14px;
+            border-radius: 8px;
+            background: #f0f0f0;
+        }
+        #planSummary.plan-error { background: #fdeaea; }
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Cerberus</h1>
+    <h1>Treadmill Controller — Sphinx</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -122,7 +134,13 @@
 
     <button id="changeModeButton" type="button" hidden>Change mode</button>
 
-    <div id="plannedNotice" role="status" hidden>Planned mode isn't available yet — plan upload is coming in a future update. Choose Manual mode to start a session now.</div>
+    <div id="plannedNotice" role="status" hidden>Planned mode selected. Choose a plan file below to load it — driving the treadmill from a plan is coming in a future update.</div>
+
+    <div id="planFileRow" hidden>
+        <label for="planFileInput">Plan file (.txt)</label>
+        <input type="file" id="planFileInput" accept=".txt,text/plain">
+    </div>
+    <div id="planSummary" role="status" hidden></div>
 
     <button id="startButton" type="button" hidden>Start</button>
 
@@ -161,8 +179,12 @@
         const recoveredSessionNotice = document.getElementById('recoveredSessionNotice');
         const discardSavedSessionButton = document.getElementById('discardSavedSessionButton');
         const shareSessionButton = document.getElementById('shareSessionButton');
+        const planFileRow = document.getElementById('planFileRow');
+        const planFileInput = document.getElementById('planFileInput');
+        const planSummary = document.getElementById('planSummary');
 
         let sessionMode = null; // 'manual' | 'planned'
+        let currentPlan = null; // array of {inclinePercent, speedKmh, durationSeconds} once a plan file has loaded and validated cleanly (Phase 4.1) — driving the treadmill from it is Phase 4.3
         let sessionState = 'idle'; // 'idle' | 'running' | 'paused' | 'finished'
         let elapsedSeconds = 0;
         let timerInterval = null;
@@ -197,6 +219,114 @@
                 if (details) text += ` (${details})`;
             } catch (e) { /* ignore, text already has the String() fallback */ }
             return text;
+        }
+
+        // Phase 4.1: parses the plan file format drafted by the user in rp1.txt —
+        // "incline:X% Speed:Ykmh Duration:Zmin" lines, full-line "#" comments, and
+        // StartLoop:N / EndLoop repeat blocks (nesting supported even though the
+        // sample plan is flat). A plan is all-or-nothing: any validation problem
+        // returns the full list of errors and no steps, rather than a partial plan.
+        const PLAN_STEP_PATTERN = /^incline\s*:\s*(\d{1,2})%\s+speed\s*:\s*(\d{1,2}\.\d)\s*kmh\s+duration\s*:\s*((?:\d+min)?(?:\d+sec)?)$/i;
+        const PLAN_STARTLOOP_PATTERN = /^startloop\s*:\s*(\d+)$/i;
+        const PLAN_ENDLOOP_PATTERN = /^endloop$/i;
+        const PLAN_DURATION_PATTERN = /^(?:(\d+)min)?(?:(\d+)sec)?$/i;
+
+        function parsePlanDuration(token, lineNumber, errors) {
+            const match = PLAN_DURATION_PATTERN.exec(token);
+            if (!match || (!match[1] && !match[2])) {
+                errors.push(`Line ${lineNumber}: invalid duration "${token}".`);
+                return null;
+            }
+            const minutes = match[1] ? parseInt(match[1], 10) : 0;
+            const seconds = match[2] ? parseInt(match[2], 10) : 0;
+            if (minutes > 180) {
+                errors.push(`Line ${lineNumber}: duration minutes (${minutes}) exceeds the 180 minute maximum.`);
+                return null;
+            }
+            if (seconds > 59) {
+                errors.push(`Line ${lineNumber}: duration seconds (${seconds}) must be 0-59.`);
+                return null;
+            }
+            const totalSeconds = minutes * 60 + seconds;
+            if (totalSeconds <= 0) {
+                errors.push(`Line ${lineNumber}: duration must be greater than zero.`);
+                return null;
+            }
+            return totalSeconds;
+        }
+
+        function parsePlanFile(text) {
+            const errors = [];
+            const instructions = []; // flat list of {type:'step'|'loopStart'|'loopEnd', ...}
+
+            text.split(/\r\n|\r|\n/).forEach((rawLine, index) => {
+                const lineNumber = index + 1;
+                const line = rawLine.trim();
+                if (line === '' || line.startsWith('#')) return;
+
+                const stepMatch = PLAN_STEP_PATTERN.exec(line);
+                if (stepMatch) {
+                    const inclinePercent = parseInt(stepMatch[1], 10);
+                    const speedKmh = parseFloat(stepMatch[2]);
+                    if (inclinePercent > 15) errors.push(`Line ${lineNumber}: incline (${inclinePercent}%) exceeds the 15% maximum.`);
+                    if (speedKmh > 20.0) errors.push(`Line ${lineNumber}: speed (${speedKmh}kmh) exceeds the 20.0kmh maximum.`);
+                    const durationSeconds = parsePlanDuration(stepMatch[3], lineNumber, errors);
+                    if (durationSeconds !== null) {
+                        instructions.push({ type: 'step', lineNumber, inclinePercent, speedKmh, durationSeconds });
+                    }
+                    return;
+                }
+
+                const loopStartMatch = PLAN_STARTLOOP_PATTERN.exec(line);
+                if (loopStartMatch) {
+                    const times = parseInt(loopStartMatch[1], 10);
+                    if (times < 1) {
+                        errors.push(`Line ${lineNumber}: StartLoop count must be at least 1.`);
+                    } else {
+                        instructions.push({ type: 'loopStart', lineNumber, times });
+                    }
+                    return;
+                }
+
+                if (PLAN_ENDLOOP_PATTERN.test(line)) {
+                    instructions.push({ type: 'loopEnd', lineNumber });
+                    return;
+                }
+
+                errors.push(`Line ${lineNumber}: unrecognised line "${line}".`);
+            });
+
+            if (errors.length > 0) return { steps: [], errors };
+
+            // Expand StartLoop/EndLoop blocks into a flat step list.
+            const steps = [];
+            const loopStack = [];
+            instructions.forEach(instruction => {
+                if (instruction.type === 'loopStart') {
+                    loopStack.push({ times: instruction.times, lineNumber: instruction.lineNumber, body: [] });
+                    return;
+                }
+                if (instruction.type === 'loopEnd') {
+                    const loop = loopStack.pop();
+                    if (!loop) {
+                        errors.push(`Line ${instruction.lineNumber}: EndLoop without a matching StartLoop.`);
+                        return;
+                    }
+                    const expanded = [];
+                    for (let i = 0; i < loop.times; i++) expanded.push(...loop.body);
+                    const target = loopStack.length > 0 ? loopStack[loopStack.length - 1].body : steps;
+                    target.push(...expanded);
+                    return;
+                }
+                const target = loopStack.length > 0 ? loopStack[loopStack.length - 1].body : steps;
+                target.push(instruction);
+            });
+            loopStack.forEach(loop => {
+                errors.push(`Line ${loop.lineNumber}: StartLoop is missing a matching EndLoop.`);
+            });
+
+            if (errors.length > 0) return { steps: [], errors };
+            return { steps, errors: [] };
         }
 
         // iConsole+0168 (JTX Sprint 6) proprietary service — see docs/ble-findings.md.
@@ -489,6 +619,10 @@ ${trackpointsXml}
             changeModeButton.hidden = true;
             startButton.hidden = true;
             plannedNotice.hidden = true;
+            planFileRow.hidden = true;
+            planSummary.hidden = true;
+            planFileInput.value = '';
+            currentPlan = null;
             sessionMode = null;
             resetSessionUI();
         }
@@ -570,14 +704,20 @@ ${trackpointsXml}
                 const modeName = sessionMode === 'manual' ? 'Manual mode' : 'Planned mode';
                 if (sessionMode === 'manual') {
                     plannedNotice.hidden = true;
+                    planFileRow.hidden = true;
+                    planSummary.hidden = true;
+                    currentPlan = null;
                     startButton.hidden = false;
                     setStatus(`Connected. ${modeName} selected. Ready to start.`);
                     announce(`${modeName} selected. Ready to start.`);
                 } else {
                     startButton.hidden = true;
                     plannedNotice.hidden = false;
+                    planFileRow.hidden = false;
+                    planSummary.hidden = true;
+                    currentPlan = null;
                     setStatus(`Connected. ${modeName} selected.`);
-                    announce(`${modeName} selected. Plan upload is not available yet.`);
+                    announce(`${modeName} selected. Choose a plan file to load it.`);
                 }
             });
         });
@@ -590,9 +730,46 @@ ${trackpointsXml}
             changeModeButton.hidden = true;
             startButton.hidden = true;
             plannedNotice.hidden = true;
+            planFileRow.hidden = true;
+            planSummary.hidden = true;
+            planFileInput.value = '';
+            currentPlan = null;
             sessionMode = null;
             setStatus('Connected. Choose a session mode.');
             announce('Mode selection unlocked.');
+        });
+
+        planFileInput.addEventListener('change', () => {
+            const file = planFileInput.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                const { steps, errors } = parsePlanFile(String(reader.result));
+                planSummary.hidden = false;
+                if (errors.length > 0) {
+                    currentPlan = null;
+                    planSummary.classList.add('plan-error');
+                    const message = `Plan file has ${errors.length} problem${errors.length === 1 ? '' : 's'}: ${errors.join(' ')}`;
+                    planSummary.textContent = message;
+                    announce(message);
+                } else {
+                    currentPlan = steps;
+                    planSummary.classList.remove('plan-error');
+                    const totalSeconds = steps.reduce((sum, s) => sum + s.durationSeconds, 0);
+                    const message = `Plan loaded: ${steps.length} step${steps.length === 1 ? '' : 's'}, total duration ${formatTime(totalSeconds)}. Driving the treadmill from this plan is coming in a future update.`;
+                    planSummary.textContent = message;
+                    announce(message);
+                }
+            };
+            reader.onerror = () => {
+                currentPlan = null;
+                planSummary.hidden = false;
+                planSummary.classList.add('plan-error');
+                planSummary.textContent = 'Could not read the selected file.';
+                announce('Could not read the selected file.');
+            };
+            reader.readAsText(file);
         });
 
         startButton.addEventListener('click', () => {
