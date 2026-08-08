@@ -49,7 +49,7 @@ Goal: PDD Ref #4 and #8. **Before starting, revisit Phase 0.1's findings and cho
 - If writable BLE control exists → build full auto-control as scoped.
 - If only readable/no BLE control exists → redefine this phase as a "plan cueing" feature instead (app announces upcoming speed/incline changes via VoiceOver, user adjusts manually) and update this plan + the PDD to reflect the reduced scope.
 
-- [ ] **4.1 Plan file format + parser.** Define and document a simple text format (duration, speed, incline per line); implement parsing and validation.
+- [ ] **4.1 Plan file format + parser.** Define and document a simple text format (duration, speed, incline per line); implement parsing and validation. User has drafted a proposed format at `rp1.txt` (repo root) — `incline:X% Speed:Ykmh Duration:Zmin` per line, plus `StartLoop,N` / `EndLoop` repeat blocks (same loop idea as the wahoo-kickr-example's format) — review it as a starting point before designing from scratch.
 - [ ] **4.2 Plan upload/selection UI.** Upload a plan file from the user's PC; list previously used plans (PDD Ref #4).
 - [ ] **4.3 Drive or cue the session** per the direction chosen above.
 
