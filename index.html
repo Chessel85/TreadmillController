@@ -102,15 +102,74 @@
             statusEl.textContent = message;
         }
 
-        connectButton.addEventListener('click', () => {
-            // TODO (Phase 1.2): replace this stub with navigator.bluetooth.requestDevice()
-            // and a real scanning/found/connected/failed state sequence.
-            connectButton.disabled = true;
-            connectButton.textContent = 'Connected';
-            modeFieldset.disabled = false;
-            setStatus('Connected. Choose a session mode.');
-            announce('Connected to treadmill. Choose a session mode.');
+        // iConsole+0168 (JTX Sprint 6) proprietary service — see docs/ble-findings.md.
+        // FTMS (0x1826) and Device Information (0x180a) are also requested so later
+        // phases can read telemetry/control characteristics without a fresh pairing.
+        const ICONSOLE_SERVICE_UUID = '0000fff0-0000-1000-8000-00805f9b34fb';
+
+        let device = null;
+        let gattServer = null;
+
+        function setConnectButtonState(state) {
+            if (state === 'idle') {
+                connectButton.disabled = false;
+                connectButton.textContent = 'Connect to treadmill';
+            } else if (state === 'busy') {
+                connectButton.disabled = true;
+            } else if (state === 'connected') {
+                connectButton.disabled = true;
+                connectButton.textContent = 'Connected';
+            }
+        }
+
+        function resetModeSelection() {
+            modeFieldset.disabled = true;
+            modeRadios.forEach(r => { r.disabled = false; r.checked = false; });
+            changeModeButton.hidden = true;
+        }
+
+        function onDisconnected() {
+            gattServer = null;
+            setConnectButtonState('idle');
+            resetModeSelection();
+            setStatus('Not connected');
+            announce('Treadmill disconnected.');
+        }
+
+        connectButton.addEventListener('click', async () => {
+            setConnectButtonState('busy');
+            setStatus('Scanning for treadmill…');
+            announce('Scanning for treadmill.');
+            try {
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'iConsole' }],
+                    optionalServices: [ICONSOLE_SERVICE_UUID, 0x1826, 0x180a]
+                });
+                const deviceName = device.name || 'treadmill';
+                setStatus(`Found ${deviceName}. Connecting…`);
+                announce(`Found ${deviceName}. Connecting.`);
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+
+                gattServer = await device.gatt.connect();
+
+                setConnectButtonState('connected');
+                modeFieldset.disabled = false;
+                setStatus(`Connected to ${deviceName}. Choose a session mode.`);
+                announce(`Connected to ${deviceName}. Choose a session mode.`);
+            } catch (error) {
+                setConnectButtonState('idle');
+                const message = error && error.name === 'NotFoundError'
+                    ? 'No treadmill selected.'
+                    : 'Connection failed. Please try again.';
+                setStatus(message);
+                announce(message);
+            }
         });
+
+        if (!navigator.bluetooth) {
+            connectButton.disabled = true;
+            setStatus('Web Bluetooth is not available in this browser.');
+        }
 
         modeRadios.forEach(radio => {
             radio.addEventListener('change', () => {
