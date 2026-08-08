@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Phoenix</title>
+    <title>Treadmill Controller — Kraken</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -63,7 +63,7 @@
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Phoenix</h1>
+    <h1>Treadmill Controller — Kraken</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -119,9 +119,15 @@
         }
 
         // iConsole+0168 (JTX Sprint 6) proprietary service — see docs/ble-findings.md.
-        // FTMS (0x1826) and Device Information (0x180a) are also requested so later
-        // phases can read telemetry/control characteristics without a fresh pairing.
+        // FTMS and Device Information are also requested so later phases can read
+        // telemetry/control characteristics without a fresh pairing. Full 128-bit
+        // UUID strings throughout (rather than the 16-bit hex shorthand like 0x1826)
+        // since Bluefy's Web Bluetooth implementation rejected requestDevice() with a
+        // bare error code 2 when short numeric UUIDs were used — full strings avoid
+        // relying on it to auto-expand them.
         const ICONSOLE_SERVICE_UUID = '0000fff0-0000-1000-8000-00805f9b34fb';
+        const FTMS_SERVICE_UUID = '00001826-0000-1000-8000-00805f9b34fb';
+        const DEVICE_INFO_SERVICE_UUID = '0000180a-0000-1000-8000-00805f9b34fb';
 
         let device = null;
         let gattServer = null;
@@ -159,8 +165,12 @@
 
             try {
                 device = await navigator.bluetooth.requestDevice({
-                    filters: [{ namePrefix: 'iConsole' }],
-                    optionalServices: [ICONSOLE_SERVICE_UUID, 0x1826, 0x180a]
+                    // acceptAllDevices instead of a namePrefix filter, to rule out
+                    // filter-matching as a second variable while diagnosing Bluefy's
+                    // requestDevice() rejection — revisit narrowing this once connect
+                    // is confirmed working.
+                    acceptAllDevices: true,
+                    optionalServices: [ICONSOLE_SERVICE_UUID, FTMS_SERVICE_UUID, DEVICE_INFO_SERVICE_UUID]
                 });
             } catch (error) {
                 console.error('requestDevice failed', error);
