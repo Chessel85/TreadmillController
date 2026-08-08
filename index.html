@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Hydra</title>
+    <title>Treadmill Controller — Cerberus</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -99,7 +99,7 @@
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Hydra</h1>
+    <h1>Treadmill Controller — Cerberus</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -366,7 +366,14 @@ ${trackpointsXml}
             try {
                 const file = new File([content], filename, { type: 'application/vnd.garmin.tcx+xml' });
                 if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                    await navigator.share({ files: [file], title: 'Treadmill session' });
+                    // title/text aren't part of the Web Share API's guaranteed contract —
+                    // Mail's share extension often uses them for subject/body, but this
+                    // isn't spec'd behaviour and may vary by iOS version.
+                    await navigator.share({
+                        files: [file],
+                        title: 'Treadmill session — upload to Strava',
+                        text: 'Upload this file to https://www.strava.com/upload/select'
+                    });
                     announce('Share sheet opened.');
                     return;
                 }
