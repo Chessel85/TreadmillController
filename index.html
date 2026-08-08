@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Sphinx</title>
+    <title>Treadmill Controller — Pegasus</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -108,10 +108,11 @@
             background: #f0f0f0;
         }
         #planSummary.plan-error { background: #fdeaea; }
+        #planLibraryList button { background: #f4f0ff; }
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Sphinx</h1>
+    <h1>Treadmill Controller — Pegasus</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -136,8 +137,13 @@
 
     <div id="plannedNotice" role="status" hidden>Planned mode selected. Choose a plan file below to load it — driving the treadmill from a plan is coming in a future update.</div>
 
+    <fieldset id="planLibraryRow" hidden>
+        <legend>Previously used plans</legend>
+        <div id="planLibraryList"></div>
+    </fieldset>
+
     <div id="planFileRow" hidden>
-        <label for="planFileInput">Plan file (.txt)</label>
+        <label for="planFileInput">Upload a plan file (.txt)</label>
         <input type="file" id="planFileInput" accept=".txt,text/plain">
     </div>
     <div id="planSummary" role="status" hidden></div>
@@ -182,6 +188,8 @@
         const planFileRow = document.getElementById('planFileRow');
         const planFileInput = document.getElementById('planFileInput');
         const planSummary = document.getElementById('planSummary');
+        const planLibraryRow = document.getElementById('planLibraryRow');
+        const planLibraryList = document.getElementById('planLibraryList');
 
         let sessionMode = null; // 'manual' | 'planned'
         let currentPlan = null; // array of {inclinePercent, speedKmh, durationSeconds} once a plan file has loaded and validated cleanly (Phase 4.1) — driving the treadmill from it is Phase 4.3
@@ -327,6 +335,101 @@
 
             if (errors.length > 0) return { steps: [], errors };
             return { steps, errors: [] };
+        }
+
+        // Phase 4.2: remembers up to PLAN_LIBRARY_MAX previously used plan files in
+        // localStorage (most-recently-used first) so the user can reload one with a
+        // single tap instead of re-uploading. Kept deliberately short per the
+        // "minimize scrolling" preference — a blind VoiceOver user pays a real cost
+        // for every extra item in a list.
+        const PLAN_LIBRARY_KEY = 'treadmillPlanLibrary';
+        const PLAN_LIBRARY_MAX = 5;
+
+        function loadPlanLibrary() {
+            try {
+                const raw = localStorage.getItem(PLAN_LIBRARY_KEY);
+                const parsed = raw ? JSON.parse(raw) : [];
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function savePlanLibrary(library) {
+            try {
+                localStorage.setItem(PLAN_LIBRARY_KEY, JSON.stringify(library));
+            } catch (error) {
+                console.error('Failed to save plan library', error);
+            }
+        }
+
+        function rememberPlan(filename, text, steps) {
+            let library = loadPlanLibrary().filter(p => p.filename !== filename);
+            library.unshift({
+                filename,
+                text,
+                stepCount: steps.length,
+                totalSeconds: steps.reduce((sum, s) => sum + s.durationSeconds, 0),
+                savedAt: new Date().toISOString()
+            });
+            savePlanLibrary(library.slice(0, PLAN_LIBRARY_MAX));
+        }
+
+        function forgetPlan(filename) {
+            savePlanLibrary(loadPlanLibrary().filter(p => p.filename !== filename));
+        }
+
+        function renderPlanLibrary() {
+            planLibraryList.innerHTML = '';
+            const library = loadPlanLibrary();
+            if (library.length === 0) {
+                planLibraryRow.hidden = true;
+                return;
+            }
+            planLibraryRow.hidden = false;
+            library.forEach(entry => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                const stepText = `${entry.stepCount} step${entry.stepCount === 1 ? '' : 's'}`;
+                button.textContent = `Load "${entry.filename}" — ${stepText}, ${formatTime(entry.totalSeconds)}`;
+                button.addEventListener('click', () => loadPlanFromLibrary(entry));
+                planLibraryList.appendChild(button);
+            });
+        }
+
+        // Applies a parsed plan result to the UI. Returns true on success. Shared
+        // by both the file-upload path and the previously-used-plans path so the
+        // summary/error handling only lives in one place.
+        function applyPlanParseResult(filename, steps, errors) {
+            planSummary.hidden = false;
+            if (errors.length > 0) {
+                currentPlan = null;
+                planSummary.classList.add('plan-error');
+                const message = `Plan file has ${errors.length} problem${errors.length === 1 ? '' : 's'}: ${errors.join(' ')}`;
+                planSummary.textContent = message;
+                announce(message);
+                return false;
+            }
+            currentPlan = steps;
+            planSummary.classList.remove('plan-error');
+            const totalSeconds = steps.reduce((sum, s) => sum + s.durationSeconds, 0);
+            const message = `Plan loaded from "${filename}": ${steps.length} step${steps.length === 1 ? '' : 's'}, total duration ${formatTime(totalSeconds)}. Driving the treadmill from this plan is coming in a future update.`;
+            planSummary.textContent = message;
+            announce(message);
+            return true;
+        }
+
+        function loadPlanFromLibrary(entry) {
+            const { steps, errors } = parsePlanFile(entry.text);
+            const ok = applyPlanParseResult(entry.filename, steps, errors);
+            if (ok) {
+                rememberPlan(entry.filename, entry.text, steps); // bump recency
+            } else {
+                // The stored plan no longer parses cleanly (e.g. parser rules changed
+                // since it was saved) — drop it rather than leaving a dead entry.
+                forgetPlan(entry.filename);
+            }
+            renderPlanLibrary();
         }
 
         // iConsole+0168 (JTX Sprint 6) proprietary service — see docs/ble-findings.md.
@@ -619,6 +722,7 @@ ${trackpointsXml}
             changeModeButton.hidden = true;
             startButton.hidden = true;
             plannedNotice.hidden = true;
+            planLibraryRow.hidden = true;
             planFileRow.hidden = true;
             planSummary.hidden = true;
             planFileInput.value = '';
@@ -704,6 +808,7 @@ ${trackpointsXml}
                 const modeName = sessionMode === 'manual' ? 'Manual mode' : 'Planned mode';
                 if (sessionMode === 'manual') {
                     plannedNotice.hidden = true;
+                    planLibraryRow.hidden = true;
                     planFileRow.hidden = true;
                     planSummary.hidden = true;
                     currentPlan = null;
@@ -716,6 +821,7 @@ ${trackpointsXml}
                     planFileRow.hidden = false;
                     planSummary.hidden = true;
                     currentPlan = null;
+                    renderPlanLibrary();
                     setStatus(`Connected. ${modeName} selected.`);
                     announce(`${modeName} selected. Choose a plan file to load it.`);
                 }
@@ -730,6 +836,7 @@ ${trackpointsXml}
             changeModeButton.hidden = true;
             startButton.hidden = true;
             plannedNotice.hidden = true;
+            planLibraryRow.hidden = true;
             planFileRow.hidden = true;
             planSummary.hidden = true;
             planFileInput.value = '';
@@ -745,21 +852,12 @@ ${trackpointsXml}
 
             const reader = new FileReader();
             reader.onload = () => {
-                const { steps, errors } = parsePlanFile(String(reader.result));
-                planSummary.hidden = false;
-                if (errors.length > 0) {
-                    currentPlan = null;
-                    planSummary.classList.add('plan-error');
-                    const message = `Plan file has ${errors.length} problem${errors.length === 1 ? '' : 's'}: ${errors.join(' ')}`;
-                    planSummary.textContent = message;
-                    announce(message);
-                } else {
-                    currentPlan = steps;
-                    planSummary.classList.remove('plan-error');
-                    const totalSeconds = steps.reduce((sum, s) => sum + s.durationSeconds, 0);
-                    const message = `Plan loaded: ${steps.length} step${steps.length === 1 ? '' : 's'}, total duration ${formatTime(totalSeconds)}. Driving the treadmill from this plan is coming in a future update.`;
-                    planSummary.textContent = message;
-                    announce(message);
+                const text = String(reader.result);
+                const { steps, errors } = parsePlanFile(text);
+                const ok = applyPlanParseResult(file.name, steps, errors);
+                if (ok) {
+                    rememberPlan(file.name, text, steps);
+                    renderPlanLibrary();
                 }
             };
             reader.onerror = () => {
