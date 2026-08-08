@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Basilisk</title>
+    <title>Treadmill Controller — Chimera</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -82,10 +82,15 @@
             gap: 10px;
         }
         .button-row button { flex: 1; }
+        #telemetryDisplay {
+            text-align: center;
+            margin: 10px 0;
+            color: #444;
+        }
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Basilisk</h1>
+    <h1>Treadmill Controller — Chimera</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -113,6 +118,8 @@
         <span id="timerDisplay">0:00</span>
     </div>
 
+    <div id="telemetryDisplay" hidden>Speed: <span id="speedValue">–</span> km/h · Incline: <span id="inclineValue">–</span>%</div>
+
     <div id="sessionButtonRow" class="button-row" hidden>
         <button id="pauseResumeButton" type="button">Pause</button>
         <button id="finishButton" type="button">Finish</button>
@@ -133,6 +140,9 @@
         const sessionButtonRow = document.getElementById('sessionButtonRow');
         const pauseResumeButton = document.getElementById('pauseResumeButton');
         const finishButton = document.getElementById('finishButton');
+        const telemetryDisplay = document.getElementById('telemetryDisplay');
+        const speedValue = document.getElementById('speedValue');
+        const inclineValue = document.getElementById('inclineValue');
         const instructionRegion = document.getElementById('instructionRegion');
 
         let sessionMode = null; // 'manual' | 'planned'
@@ -181,9 +191,80 @@
         const ICONSOLE_SERVICE_UUID = '0000fff0-0000-1000-8000-00805f9b34fb';
         const FTMS_SERVICE_UUID = '00001826-0000-1000-8000-00805f9b34fb';
         const DEVICE_INFO_SERVICE_UUID = '0000180a-0000-1000-8000-00805f9b34fb';
+        const TREADMILL_DATA_CHARACTERISTIC_UUID = '00002acd-0000-1000-8000-00805f9b34fb';
 
         let device = null;
         let gattServer = null;
+        let treadmillDataChar = null;
+        let telemetryAvailable = false;
+        let lastReading = null;
+        let lastLoggedReading = null;
+        let sessionLog = []; // [{ atSeconds, speedKmh, inclinePercent }, ...] — logged only while running (PDD Ref #5)
+
+        // Decodes the FTMS Treadmill Data characteristic (Bluetooth SIG GATT spec,
+        // 0x2ACD). Only Instantaneous Speed and Inclination are extracted — other
+        // optional fields (average speed, total distance, etc.) are still walked
+        // over in spec order so the byte offset lands correctly on Inclination.
+        function decodeTreadmillData(dataView) {
+            let offset = 0;
+            const flags = dataView.getUint16(offset, true); offset += 2;
+
+            const moreDataOnly = (flags & 0x0001) !== 0; // bit0 is inverted: 0 means Instantaneous Speed IS present
+            const avgSpeedPresent = (flags & 0x0002) !== 0;
+            const totalDistancePresent = (flags & 0x0004) !== 0;
+            const inclinePresent = (flags & 0x0008) !== 0;
+
+            const reading = {};
+
+            if (!moreDataOnly && offset + 2 <= dataView.byteLength) {
+                reading.speedKmh = dataView.getUint16(offset, true) * 0.01;
+                offset += 2;
+            }
+            if (avgSpeedPresent) offset += 2;
+            if (totalDistancePresent) offset += 3;
+            if (inclinePresent && offset + 2 <= dataView.byteLength) {
+                reading.inclinePercent = dataView.getInt16(offset, true) * 0.1;
+                offset += 2; // ramp angle setting follows, not needed
+            }
+
+            return reading;
+        }
+
+        function updateTelemetryDisplay(reading) {
+            telemetryDisplay.hidden = false;
+            if (reading.speedKmh !== undefined) speedValue.textContent = reading.speedKmh.toFixed(1);
+            if (reading.inclinePercent !== undefined) inclineValue.textContent = reading.inclinePercent.toFixed(1);
+        }
+
+        function handleTreadmillData(event) {
+            const reading = decodeTreadmillData(event.target.value);
+            lastReading = reading;
+            updateTelemetryDisplay(reading);
+
+            if (sessionState !== 'running') return;
+            const changed = !lastLoggedReading
+                || reading.speedKmh !== lastLoggedReading.speedKmh
+                || reading.inclinePercent !== lastLoggedReading.inclinePercent;
+            if (changed) {
+                sessionLog.push({ atSeconds: elapsedSeconds, speedKmh: reading.speedKmh, inclinePercent: reading.inclinePercent });
+                lastLoggedReading = reading;
+            }
+        }
+
+        async function subscribeToTelemetry() {
+            try {
+                const ftmsService = await gattServer.getPrimaryService(FTMS_SERVICE_UUID);
+                treadmillDataChar = await ftmsService.getCharacteristic(TREADMILL_DATA_CHARACTERISTIC_UUID);
+                await treadmillDataChar.startNotifications();
+                treadmillDataChar.addEventListener('characteristicvaluechanged', handleTreadmillData);
+                telemetryAvailable = true;
+            } catch (error) {
+                // Non-fatal per PDD Ref #5: fall back to duration-only logging if
+                // telemetry isn't readable.
+                console.error('Telemetry subscription failed', error);
+                telemetryAvailable = false;
+            }
+        }
 
         function setConnectButtonState(state) {
             if (state === 'idle') {
@@ -206,6 +287,8 @@
             timerContainer.hidden = true;
             sessionButtonRow.hidden = true;
             pauseResumeButton.textContent = 'Pause';
+            sessionLog = [];
+            lastLoggedReading = null;
         }
 
         function resetModeSelection() {
@@ -220,6 +303,10 @@
 
         function onDisconnected() {
             gattServer = null;
+            treadmillDataChar = null;
+            telemetryAvailable = false;
+            lastReading = null;
+            telemetryDisplay.hidden = true;
             setConnectButtonState('idle');
             resetModeSelection();
             setStatus('Not connected');
@@ -271,6 +358,8 @@
             modeFieldset.disabled = false;
             setStatus(`Connected to ${deviceName}. Choose a session mode.`);
             announce(`Connected to ${deviceName}. Choose a session mode.`);
+
+            await subscribeToTelemetry();
         });
 
         if (!navigator.bluetooth) {
@@ -322,6 +411,13 @@
             sessionButtonRow.hidden = false;
             pauseResumeButton.textContent = 'Pause';
 
+            sessionLog = [];
+            lastLoggedReading = null;
+            if (lastReading) {
+                sessionLog.push({ atSeconds: 0, speedKmh: lastReading.speedKmh, inclinePercent: lastReading.inclinePercent });
+                lastLoggedReading = lastReading;
+            }
+
             timerInterval = setInterval(() => {
                 elapsedSeconds++;
                 timerDisplay.textContent = formatTime(elapsedSeconds);
@@ -358,8 +454,12 @@
             sessionButtonRow.hidden = true;
             startButton.hidden = sessionMode !== 'manual';
             changeModeButton.hidden = false;
-            setStatus(`Session finished. Duration: ${durationText}.`);
-            announce(`Session finished. Duration ${durationText}.`);
+            let message = `Session finished. Duration: ${durationText}.`;
+            if (telemetryAvailable) {
+                message += ` ${sessionLog.length} telemetry point${sessionLog.length === 1 ? '' : 's'} logged.`;
+            }
+            setStatus(message);
+            announce(message);
         });
     </script>
 </body>
