@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Wyvern</title>
+    <title>Treadmill Controller — Basilisk</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -60,10 +60,32 @@
             position: absolute; width: 1px; height: 1px; padding: 0;
             margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0;
         }
+        #plannedNotice {
+            font-weight: bold;
+            text-align: center;
+            margin: 10px 0;
+            padding: 14px;
+            border-radius: 8px;
+            background: #fff3cd;
+        }
+        .timer-display {
+            text-align: center;
+            font-size: 3rem;
+            font-weight: bold;
+            border: 3px solid #333;
+            border-radius: 15px;
+            padding: 16px 0;
+            margin: 16px 0;
+        }
+        .button-row {
+            display: flex;
+            gap: 10px;
+        }
+        .button-row button { flex: 1; }
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Wyvern</h1>
+    <h1>Treadmill Controller — Basilisk</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -83,6 +105,19 @@
 
     <button id="changeModeButton" type="button" hidden>Change mode</button>
 
+    <div id="plannedNotice" role="status" hidden>Planned mode isn't available yet — plan upload is coming in a future update. Choose Manual mode to start a session now.</div>
+
+    <button id="startButton" type="button" hidden>Start</button>
+
+    <div id="timerContainer" class="timer-display" role="timer" hidden>
+        <span id="timerDisplay">0:00</span>
+    </div>
+
+    <div id="sessionButtonRow" class="button-row" hidden>
+        <button id="pauseResumeButton" type="button">Pause</button>
+        <button id="finishButton" type="button">Finish</button>
+    </div>
+
     <div id="instructionRegion" aria-live="assertive" class="sr-only"></div>
 
     <script>
@@ -91,7 +126,25 @@
         const modeFieldset = document.getElementById('modeFieldset');
         const modeRadios = modeFieldset.querySelectorAll('input[name="mode"]');
         const changeModeButton = document.getElementById('changeModeButton');
+        const plannedNotice = document.getElementById('plannedNotice');
+        const startButton = document.getElementById('startButton');
+        const timerContainer = document.getElementById('timerContainer');
+        const timerDisplay = document.getElementById('timerDisplay');
+        const sessionButtonRow = document.getElementById('sessionButtonRow');
+        const pauseResumeButton = document.getElementById('pauseResumeButton');
+        const finishButton = document.getElementById('finishButton');
         const instructionRegion = document.getElementById('instructionRegion');
+
+        let sessionMode = null; // 'manual' | 'planned'
+        let sessionState = 'idle'; // 'idle' | 'running' | 'paused' | 'finished'
+        let elapsedSeconds = 0;
+        let timerInterval = null;
+
+        function formatTime(totalSeconds) {
+            const mins = Math.floor(totalSeconds / 60);
+            const secs = totalSeconds % 60;
+            return `${mins}:${String(secs).padStart(2, '0')}`;
+        }
 
         function announce(message) {
             instructionRegion.textContent = '';
@@ -144,10 +197,25 @@
             }
         }
 
+        function resetSessionUI() {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            sessionState = 'idle';
+            elapsedSeconds = 0;
+            timerDisplay.textContent = formatTime(0);
+            timerContainer.hidden = true;
+            sessionButtonRow.hidden = true;
+            pauseResumeButton.textContent = 'Pause';
+        }
+
         function resetModeSelection() {
             modeFieldset.disabled = true;
             modeRadios.forEach(r => { r.disabled = false; r.checked = false; });
             changeModeButton.hidden = true;
+            startButton.hidden = true;
+            plannedNotice.hidden = true;
+            sessionMode = null;
+            resetSessionUI();
         }
 
         function onDisconnected() {
@@ -215,20 +283,83 @@
                 if (!radio.checked) return;
                 modeRadios.forEach(r => { r.disabled = true; });
                 changeModeButton.hidden = false;
-                const modeName = radio.value === 'manual' ? 'Manual mode' : 'Planned mode';
-                setStatus(`Connected. ${modeName} selected.`);
-                announce(`${modeName} selected.`);
+                sessionMode = radio.value;
+                const modeName = sessionMode === 'manual' ? 'Manual mode' : 'Planned mode';
+                if (sessionMode === 'manual') {
+                    plannedNotice.hidden = true;
+                    startButton.hidden = false;
+                    setStatus(`Connected. ${modeName} selected. Ready to start.`);
+                    announce(`${modeName} selected. Ready to start.`);
+                } else {
+                    startButton.hidden = true;
+                    plannedNotice.hidden = false;
+                    setStatus(`Connected. ${modeName} selected.`);
+                    announce(`${modeName} selected. Plan upload is not available yet.`);
+                }
             });
         });
 
         changeModeButton.addEventListener('click', () => {
             // Per PDD Ref #2, mode selection is locked once a session starts and can only be
-            // changed once that session is cancelled or ended. Session start/end doesn't exist
-            // yet (Phase 2), so for now this button just unlocks selection again.
+            // changed once that session is cancelled or ended — enforced by hiding this
+            // button for the duration of the session (see startButton/finishButton handlers).
             modeRadios.forEach(r => { r.disabled = false; r.checked = false; });
             changeModeButton.hidden = true;
+            startButton.hidden = true;
+            plannedNotice.hidden = true;
+            sessionMode = null;
             setStatus('Connected. Choose a session mode.');
             announce('Mode selection unlocked.');
+        });
+
+        startButton.addEventListener('click', () => {
+            sessionState = 'running';
+            elapsedSeconds = 0;
+            timerDisplay.textContent = formatTime(0);
+            changeModeButton.hidden = true;
+            startButton.hidden = true;
+            timerContainer.hidden = false;
+            sessionButtonRow.hidden = false;
+            pauseResumeButton.textContent = 'Pause';
+
+            timerInterval = setInterval(() => {
+                elapsedSeconds++;
+                timerDisplay.textContent = formatTime(elapsedSeconds);
+            }, 1000);
+
+            setStatus('Session running.');
+            announce('Session started.');
+        });
+
+        pauseResumeButton.addEventListener('click', () => {
+            if (sessionState === 'running') {
+                sessionState = 'paused';
+                clearInterval(timerInterval);
+                pauseResumeButton.textContent = 'Resume';
+                setStatus('Session paused.');
+                announce('Session paused.');
+            } else if (sessionState === 'paused') {
+                sessionState = 'running';
+                timerInterval = setInterval(() => {
+                    elapsedSeconds++;
+                    timerDisplay.textContent = formatTime(elapsedSeconds);
+                }, 1000);
+                pauseResumeButton.textContent = 'Pause';
+                setStatus('Session running.');
+                announce('Session resumed.');
+            }
+        });
+
+        finishButton.addEventListener('click', () => {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            sessionState = 'finished';
+            const durationText = formatTime(elapsedSeconds);
+            sessionButtonRow.hidden = true;
+            startButton.hidden = sessionMode !== 'manual';
+            changeModeButton.hidden = false;
+            setStatus(`Session finished. Duration: ${durationText}.`);
+            announce(`Session finished. Duration ${durationText}.`);
         });
     </script>
 </body>
