@@ -4,9 +4,134 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Treadmill Controller</title>
+    <style>
+        :root { color-scheme: light; }
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 16px;
+            background: #fff;
+            color: #111;
+        }
+        h1 { font-size: 1.4rem; }
+        button {
+            display: block;
+            width: 100%;
+            padding: 20px;
+            margin: 10px 0;
+            font-size: 1.2rem;
+            font-weight: bold;
+            border: 3px solid #000;
+            border-radius: 12px;
+            background: #f8f8f8;
+        }
+        button:disabled { opacity: 0.5; }
+        #connectButton { background: #e7f3ff; }
+        #status {
+            font-weight: bold;
+            text-align: center;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 8px;
+            background: #f0f0f0;
+        }
+        fieldset {
+            border: 3px solid #333;
+            border-radius: 12px;
+            padding: 12px;
+            margin: 16px 0;
+        }
+        fieldset:disabled { opacity: 0.5; }
+        legend { font-weight: bold; padding: 0 6px; }
+        .mode-option {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 8px;
+            font-size: 1.1rem;
+        }
+        .mode-option input {
+            width: 28px;
+            height: 28px;
+            flex-shrink: 0;
+        }
+        .sr-only {
+            position: absolute; width: 1px; height: 1px; padding: 0;
+            margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0;
+        }
+    </style>
 </head>
 <body>
     <h1>Treadmill Controller</h1>
-    <p>Deploy scaffolding check: if you can read this, GitHub Pages is serving this repo correctly.</p>
+
+    <div id="status" role="status">Not connected</div>
+
+    <button id="connectButton" type="button">Connect to treadmill</button>
+
+    <fieldset id="modeFieldset" disabled>
+        <legend>Choose session mode</legend>
+        <label class="mode-option">
+            <input type="radio" name="mode" id="modeManual" value="manual">
+            Manual mode — I control speed and incline on the treadmill; the app only logs the session.
+        </label>
+        <label class="mode-option">
+            <input type="radio" name="mode" id="modePlanned" value="planned">
+            Planned mode — upload a plan and the app drives speed and incline changes.
+        </label>
+    </fieldset>
+
+    <button id="changeModeButton" type="button" hidden>Change mode</button>
+
+    <div id="instructionRegion" aria-live="assertive" class="sr-only"></div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const connectButton = document.getElementById('connectButton');
+        const modeFieldset = document.getElementById('modeFieldset');
+        const modeRadios = modeFieldset.querySelectorAll('input[name="mode"]');
+        const changeModeButton = document.getElementById('changeModeButton');
+        const instructionRegion = document.getElementById('instructionRegion');
+
+        function announce(message) {
+            instructionRegion.textContent = '';
+            requestAnimationFrame(() => { instructionRegion.textContent = message; });
+        }
+
+        function setStatus(message) {
+            statusEl.textContent = message;
+        }
+
+        connectButton.addEventListener('click', () => {
+            // TODO (Phase 1.2): replace this stub with navigator.bluetooth.requestDevice()
+            // and a real scanning/found/connected/failed state sequence.
+            connectButton.disabled = true;
+            connectButton.textContent = 'Connected';
+            modeFieldset.disabled = false;
+            setStatus('Connected. Choose a session mode.');
+            announce('Connected to treadmill. Choose a session mode.');
+        });
+
+        modeRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (!radio.checked) return;
+                modeRadios.forEach(r => { r.disabled = true; });
+                changeModeButton.hidden = false;
+                const modeName = radio.value === 'manual' ? 'Manual mode' : 'Planned mode';
+                setStatus(`Connected. ${modeName} selected.`);
+                announce(`${modeName} selected.`);
+            });
+        });
+
+        changeModeButton.addEventListener('click', () => {
+            // Per PDD Ref #2, mode selection is locked once a session starts and can only be
+            // changed once that session is cancelled or ended. Session start/end doesn't exist
+            // yet (Phase 2), so for now this button just unlocks selection again.
+            modeRadios.forEach(r => { r.disabled = false; r.checked = false; });
+            changeModeButton.hidden = true;
+            setStatus('Connected. Choose a session mode.');
+            announce('Mode selection unlocked.');
+        });
+    </script>
 </body>
 </html>

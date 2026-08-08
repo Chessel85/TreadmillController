@@ -9,7 +9,7 @@
 
 ## Status
 - **Current phase:** Phase 1 — Accessible shell & Bluetooth connect flow
-- **Next task:** 1.1 — Page shell & mode selection
+- **Next task:** 1.2 — Treadmill connect flow
 - **Last updated:** 2026-08-08
 
 ## Reference
@@ -27,7 +27,7 @@ Goal: answer the unknowns that could reshape scope, before investing in build-ou
 ## Phase 1 — Accessible shell & Bluetooth connect flow
 Goal: the skeleton every other feature sits inside.
 
-- [ ] **1.1 Page shell & mode selection.** Semantic, VoiceOver-friendly landing screen: connect-to-treadmill entry point, then choice of Manual vs Planned mode (locked once a session starts, per PDD Ref #2).
+- [x] **1.1 Page shell & mode selection.** Semantic, VoiceOver-friendly landing screen: connect-to-treadmill entry point, then choice of Manual vs Planned mode (locked once a session starts, per PDD Ref #2).
 - [ ] **1.2 Treadmill connect flow.** `navigator.bluetooth.requestDevice` flow with an accessible "scanning / found / connected / failed" state sequence (PDD Ref #1).
 
 ## Phase 2 — Manual mode logging (primary objective — build this before Strava/planned mode)
@@ -64,3 +64,4 @@ Goal: PDD Ref #4 and #8. **Before starting, revisit Phase 0.1's findings and cho
 - **2026-08-08**: Completed 0.1 via LightBlue scan (screenshots in `docs/ble-screenshots/`, write-up in `docs/ble-findings.md`). Treadmill advertises as `iConsole+0168`. Two relevant services: proprietary `0xFFF0` (notify `0xFFF1` + write `0xFFF2` — the iConsole protocol, undocumented but a known/previously-reverse-engineered pattern) and standard FTMS `0x1826` (read/notify only — no Control Point, so telemetry-only via `0x2ACD` Treadmill Data, but that's the officially documented format so easy to decode). Net result: writable control exists, so Phase 4 auto-control stays in scope, but will need the proprietary `0xFFF2` command format rather than standard FTMS control — research existing open-source iConsole reverse-engineering before attempting from scratch. A separate OTA/DFU service was also found and should be left alone (firmware-flashing, not control).
 - **2026-08-08**: Completed 0.2. User already has a working, VoiceOver-tested Bluefy page for a different BLE fitness device (Wahoo KICKR bike trainer) hosted on a separate GitHub Pages repo; copied in as `docs/reference/wahoo-kickr-example.html` for reference. It confirms the connect/device-picker VoiceOver flow works with no friction, and doubles as a strong pattern reference for this project: accessible connect-button + `role="status"` live region, `role="timer"` session display, `aria-live="assertive"` instruction announcements, start/pause session logic, and — notably for Phase 4 — a working plan-file text format (`value,duration` per line, `startloop,N`/`endloop` blocks, `#` comments) with a parser, plus listing available plan files via the GitHub contents API. Should be consulted when building Phase 1.2 (connect flow), Phase 4.1 (plan format/parser) and 4.2 (plan selection UI), and Phase 5.3 (VoiceOver pass) rather than designing those from scratch.
 - **2026-08-08**: Completed 0.3. GitHub Pages enabled via `gh api` (main branch, root, `build_type=legacy`), live at https://chessel85.github.io/TreadmillController/. Pushed a placeholder `index.html`; user confirmed it loads on their iPhone via Bluefy. Phase 0 is now complete — added `docs/README.md` as an index and a context-setting header comment to `docs/reference/wahoo-kickr-example.html`, and refreshed CLAUDE.md's "Project status" section (was still describing the pre-Phase-0 empty-repo state). Starting Phase 1 next: the placeholder `index.html` gets replaced by the real page shell in 1.1.
+- **2026-08-08**: Completed 1.1. Replaced the placeholder `index.html` with the real page shell, following the wahoo-kickr-example patterns (`role="status"` live region, `aria-live="assertive"` sr-only instruction region, large touch targets). Structure: a Connect button, then a `<fieldset>` of two mode radios (Manual / Planned) that stays `disabled` until connected. Selecting a mode disables the radios (locking the choice) and reveals a "Change mode" button — this is a stand-in for the real Ref #2 lock (which should key off session start/cancel/end, not just mode selection) since session state doesn't exist until Phase 2; revisit this button's behavior then. The connect button itself is a stub (flips UI state, no real BLE call) with a `TODO (Phase 1.2)` marking where `navigator.bluetooth.requestDevice()` and the scanning/found/connected/failed sequence get wired in next.
