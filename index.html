@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Chimera</title>
+    <title>Treadmill Controller — Manticore</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -68,6 +68,14 @@
             border-radius: 8px;
             background: #fff3cd;
         }
+        #recoveredSessionNotice {
+            font-weight: bold;
+            text-align: center;
+            margin: 10px 0;
+            padding: 14px;
+            border-radius: 8px;
+            background: #e7f3ff;
+        }
         .timer-display {
             text-align: center;
             font-size: 3rem;
@@ -90,9 +98,12 @@
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Chimera</h1>
+    <h1>Treadmill Controller — Manticore</h1>
 
     <div id="status" role="status">Not connected</div>
+
+    <div id="recoveredSessionNotice" role="status" hidden></div>
+    <button id="discardSavedSessionButton" type="button" hidden>Discard saved session</button>
 
     <button id="connectButton" type="button">Connect to treadmill</button>
 
@@ -144,6 +155,8 @@
         const speedValue = document.getElementById('speedValue');
         const inclineValue = document.getElementById('inclineValue');
         const instructionRegion = document.getElementById('instructionRegion');
+        const recoveredSessionNotice = document.getElementById('recoveredSessionNotice');
+        const discardSavedSessionButton = document.getElementById('discardSavedSessionButton');
 
         let sessionMode = null; // 'manual' | 'planned'
         let sessionState = 'idle'; // 'idle' | 'running' | 'paused' | 'finished'
@@ -201,6 +214,61 @@
         let lastLoggedReading = null;
         let sessionLog = []; // [{ atSeconds, speedKmh, inclinePercent }, ...] — logged only while running (PDD Ref #5)
 
+        // Local session storage (PDD-adjacent Phase 2.3): the in-progress/finished
+        // session is written to localStorage as it changes, independent of the
+        // in-memory UI state, so a dropped BLE connection or accidental reload
+        // doesn't silently lose logged data. Actually *resuming* a saved session
+        // into a live UI is Phase 5.2 — this just makes sure nothing is lost until
+        // then, and surfaces a summary on next page load so the user knows it's there.
+        const SESSION_STORAGE_KEY = 'treadmillSession';
+
+        function saveSessionToStorage() {
+            if (sessionState === 'idle') return;
+            try {
+                localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+                    mode: sessionMode,
+                    state: sessionState,
+                    elapsedSeconds,
+                    sessionLog,
+                    savedAt: new Date().toISOString()
+                }));
+            } catch (error) {
+                console.error('Failed to save session to localStorage', error);
+            }
+        }
+
+        function clearSavedSession() {
+            try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (error) { /* ignore */ }
+            recoveredSessionNotice.hidden = true;
+            recoveredSessionNotice.textContent = '';
+            discardSavedSessionButton.hidden = true;
+        }
+
+        function checkForSavedSession() {
+            let saved;
+            try {
+                const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+                if (!raw) return;
+                saved = JSON.parse(raw);
+            } catch (error) {
+                return;
+            }
+            if (!saved || !Array.isArray(saved.sessionLog)) return;
+
+            const durationText = formatTime(saved.elapsedSeconds || 0);
+            const pointCount = saved.sessionLog.length;
+            const modeName = saved.mode === 'planned' ? 'Planned' : 'Manual';
+            const message = `Found a saved ${modeName.toLowerCase()} session from a previous visit: ${durationText}, ${pointCount} telemetry point${pointCount === 1 ? '' : 's'} logged. Strava upload for saved sessions is coming in a later update — it will stay saved until you discard it.`;
+            recoveredSessionNotice.textContent = message;
+            recoveredSessionNotice.hidden = false;
+            discardSavedSessionButton.hidden = false;
+        }
+
+        discardSavedSessionButton.addEventListener('click', () => {
+            clearSavedSession();
+            announce('Saved session discarded.');
+        });
+
         // Decodes the FTMS Treadmill Data characteristic (Bluetooth SIG GATT spec,
         // 0x2ACD). Only Instantaneous Speed and Inclination are extracted — other
         // optional fields (average speed, total distance, etc.) are still walked
@@ -248,6 +316,7 @@
             if (changed) {
                 sessionLog.push({ atSeconds: elapsedSeconds, speedKmh: reading.speedKmh, inclinePercent: reading.inclinePercent });
                 lastLoggedReading = reading;
+                saveSessionToStorage();
             }
         }
 
@@ -367,6 +436,8 @@
             setStatus('Web Bluetooth is not available in this browser.');
         }
 
+        checkForSavedSession();
+
         modeRadios.forEach(radio => {
             radio.addEventListener('change', () => {
                 if (!radio.checked) return;
@@ -402,6 +473,8 @@
         });
 
         startButton.addEventListener('click', () => {
+            clearSavedSession(); // starting fresh — any old saved session is now superseded
+
             sessionState = 'running';
             elapsedSeconds = 0;
             timerDisplay.textContent = formatTime(0);
@@ -421,8 +494,10 @@
             timerInterval = setInterval(() => {
                 elapsedSeconds++;
                 timerDisplay.textContent = formatTime(elapsedSeconds);
+                saveSessionToStorage();
             }, 1000);
 
+            saveSessionToStorage();
             setStatus('Session running.');
             announce('Session started.');
         });
@@ -432,6 +507,7 @@
                 sessionState = 'paused';
                 clearInterval(timerInterval);
                 pauseResumeButton.textContent = 'Resume';
+                saveSessionToStorage();
                 setStatus('Session paused.');
                 announce('Session paused.');
             } else if (sessionState === 'paused') {
@@ -439,8 +515,10 @@
                 timerInterval = setInterval(() => {
                     elapsedSeconds++;
                     timerDisplay.textContent = formatTime(elapsedSeconds);
+                    saveSessionToStorage();
                 }, 1000);
                 pauseResumeButton.textContent = 'Pause';
+                saveSessionToStorage();
                 setStatus('Session running.');
                 announce('Session resumed.');
             }
@@ -450,6 +528,7 @@
             clearInterval(timerInterval);
             timerInterval = null;
             sessionState = 'finished';
+            saveSessionToStorage();
             const durationText = formatTime(elapsedSeconds);
             sessionButtonRow.hidden = true;
             startButton.hidden = sessionMode !== 'manual';
