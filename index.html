@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Kraken</title>
+    <title>Treadmill Controller — Wyvern</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -63,7 +63,7 @@
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Kraken</h1>
+    <h1>Treadmill Controller — Wyvern</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -165,11 +165,11 @@
 
             try {
                 device = await navigator.bluetooth.requestDevice({
-                    // acceptAllDevices instead of a namePrefix filter, to rule out
-                    // filter-matching as a second variable while diagnosing Bluefy's
-                    // requestDevice() rejection — revisit narrowing this once connect
-                    // is confirmed working.
-                    acceptAllDevices: true,
+                    // Filtered by name so the device picker shows only the treadmill —
+                    // acceptAllDevices was a temporary diagnostic step (see Kraken in
+                    // IMPLEMENTATION_PLAN.md's Session Log) to rule out filter-matching
+                    // while the real bug (short numeric UUIDs below) was being found.
+                    filters: [{ namePrefix: 'iConsole' }],
                     optionalServices: [ICONSOLE_SERVICE_UUID, FTMS_SERVICE_UUID, DEVICE_INFO_SERVICE_UUID]
                 });
             } catch (error) {
