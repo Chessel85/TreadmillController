@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Manticore</title>
+    <title>Treadmill Controller — Hydra</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -95,10 +95,11 @@
             margin: 10px 0;
             color: #444;
         }
+        #shareSessionButton { background: #e6f9ec; }
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Manticore</h1>
+    <h1>Treadmill Controller — Hydra</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -136,6 +137,8 @@
         <button id="finishButton" type="button">Finish</button>
     </div>
 
+    <button id="shareSessionButton" type="button" hidden>Share / download session file (.tcx)</button>
+
     <div id="instructionRegion" aria-live="assertive" class="sr-only"></div>
 
     <script>
@@ -157,11 +160,13 @@
         const instructionRegion = document.getElementById('instructionRegion');
         const recoveredSessionNotice = document.getElementById('recoveredSessionNotice');
         const discardSavedSessionButton = document.getElementById('discardSavedSessionButton');
+        const shareSessionButton = document.getElementById('shareSessionButton');
 
         let sessionMode = null; // 'manual' | 'planned'
         let sessionState = 'idle'; // 'idle' | 'running' | 'paused' | 'finished'
         let elapsedSeconds = 0;
         let timerInterval = null;
+        let sessionStartTime = null; // Date — set on Start, used as the TCX activity's absolute timestamp base
 
         function formatTime(totalSeconds) {
             const mins = Math.floor(totalSeconds / 60);
@@ -230,6 +235,7 @@
                     state: sessionState,
                     elapsedSeconds,
                     sessionLog,
+                    startedAt: sessionStartTime ? sessionStartTime.toISOString() : null,
                     savedAt: new Date().toISOString()
                 }));
             } catch (error) {
@@ -267,6 +273,114 @@
         discardSavedSessionButton.addEventListener('click', () => {
             clearSavedSession();
             announce('Saved session discarded.');
+        });
+
+        function toIsoSeconds(date) {
+            return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+        }
+
+        // sessionLog only records a point when speed/incline *changes* (see
+        // handleTreadmillData), so each entry's speed is held constant until the
+        // next entry (or the end of the session) — distance is integrated segment
+        // by segment on that basis, not sampled continuously.
+        function buildTcxTrackpoints(log, totalElapsedSeconds) {
+            const points = [];
+            let cumulativeDistance = 0;
+            for (let i = 0; i < log.length; i++) {
+                const entry = log[i];
+                points.push({ atSeconds: entry.atSeconds, distanceMeters: cumulativeDistance });
+                const segmentEnd = i + 1 < log.length ? log[i + 1].atSeconds : totalElapsedSeconds;
+                const segmentSeconds = Math.max(0, segmentEnd - entry.atSeconds);
+                const speedKmh = entry.speedKmh || 0;
+                cumulativeDistance += speedKmh * 1000 / 3600 * segmentSeconds;
+            }
+            points.push({ atSeconds: totalElapsedSeconds, distanceMeters: cumulativeDistance });
+            return { points, totalDistanceMeters: cumulativeDistance };
+        }
+
+        // Builds a minimal TCX (Garmin Training Center Database v2) file — the
+        // format Strava's manual "Upload Activity" page accepts for an indoor
+        // (no-GPS) run. Only time and distance are included, per PDD Ref #5/#9;
+        // TCX has no standard incline field, and detailed speed/incline history
+        // stays available in the app's own telemetry log rather than the export.
+        function buildSessionTcx(startTime, log, totalElapsedSeconds) {
+            const { points, totalDistanceMeters } = buildTcxTrackpoints(log, totalElapsedSeconds);
+            const isoStart = toIsoSeconds(startTime);
+            const trackpointsXml = points.map(p => {
+                const pointTime = toIsoSeconds(new Date(startTime.getTime() + p.atSeconds * 1000));
+                return `      <Trackpoint>\n        <Time>${pointTime}</Time>\n        <DistanceMeters>${p.distanceMeters.toFixed(1)}</DistanceMeters>\n      </Trackpoint>`;
+            }).join('\n');
+
+            return `<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2 http://www.garmin.com/xmlschemas/TrainingCenterDatabasev2.xsd">
+  <Activities>
+    <Activity Sport="Running">
+      <Id>${isoStart}</Id>
+      <Lap StartTime="${isoStart}">
+        <TotalTimeSeconds>${totalElapsedSeconds}</TotalTimeSeconds>
+        <DistanceMeters>${totalDistanceMeters.toFixed(1)}</DistanceMeters>
+        <Intensity>Active</Intensity>
+        <TriggerMethod>Manual</TriggerMethod>
+        <Track>
+${trackpointsXml}
+        </Track>
+      </Lap>
+      <Creator xsi:type="Device_t">
+        <Name>Treadmill Controller</Name>
+        <UnitId>0</UnitId>
+        <ProductID>0</ProductID>
+        <Version>
+          <VersionMajor>1</VersionMajor>
+          <VersionMinor>0</VersionMinor>
+          <BuildMajor>0</BuildMajor>
+          <BuildMinor>0</BuildMinor>
+        </Version>
+      </Creator>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>
+`;
+        }
+
+        function downloadTcx(filename, content) {
+            const blob = new Blob([content], { type: 'application/vnd.garmin.tcx+xml' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        async function shareOrDownloadSessionFile() {
+            const startTime = sessionStartTime || new Date(Date.now() - elapsedSeconds * 1000);
+            const content = buildSessionTcx(startTime, sessionLog, elapsedSeconds);
+            const filename = `treadmill-session-${toIsoSeconds(startTime).replace(/[:.]/g, '-')}.tcx`;
+
+            // Bluefy's browser engine may not support sharing files via the Web
+            // Share API (it's not mainline Safari) — fall back to a plain download
+            // if navigator.share with a file isn't usable, so the user can still
+            // get the file (e.g. via the Files app) either way.
+            try {
+                const file = new File([content], filename, { type: 'application/vnd.garmin.tcx+xml' });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: 'Treadmill session' });
+                    announce('Share sheet opened.');
+                    return;
+                }
+            } catch (error) {
+                if (error && error.name === 'AbortError') return; // user cancelled the share sheet
+                console.error('Sharing failed, falling back to download', error);
+            }
+
+            downloadTcx(filename, content);
+            announce('Session file downloaded.');
+        }
+
+        shareSessionButton.addEventListener('click', () => {
+            shareOrDownloadSessionFile();
         });
 
         // Decodes the FTMS Treadmill Data characteristic (Bluetooth SIG GATT spec,
@@ -358,6 +472,8 @@
             pauseResumeButton.textContent = 'Pause';
             sessionLog = [];
             lastLoggedReading = null;
+            sessionStartTime = null;
+            shareSessionButton.hidden = true;
         }
 
         function resetModeSelection() {
@@ -477,9 +593,11 @@
 
             sessionState = 'running';
             elapsedSeconds = 0;
+            sessionStartTime = new Date();
             timerDisplay.textContent = formatTime(0);
             changeModeButton.hidden = true;
             startButton.hidden = true;
+            shareSessionButton.hidden = true;
             timerContainer.hidden = false;
             sessionButtonRow.hidden = false;
             pauseResumeButton.textContent = 'Pause';
@@ -533,10 +651,12 @@
             sessionButtonRow.hidden = true;
             startButton.hidden = sessionMode !== 'manual';
             changeModeButton.hidden = false;
+            shareSessionButton.hidden = false;
             let message = `Session finished. Duration: ${durationText}.`;
             if (telemetryAvailable) {
                 message += ` ${sessionLog.length} telemetry point${sessionLog.length === 1 ? '' : 's'} logged.`;
             }
+            message += ' Use the Share button to get the session file for Strava.';
             setStatus(message);
             announce(message);
         });
