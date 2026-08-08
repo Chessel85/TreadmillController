@@ -9,7 +9,7 @@
 
 ## Status
 - **Current phase:** Phase 0 — De-risking spikes
-- **Next task:** 0.1 — BLE capability investigation
+- **Next task:** 0.2 — Bluefy + VoiceOver spot check
 - **Last updated:** 2026-08-08
 
 ## Reference
@@ -20,7 +20,7 @@ Requirements: `Product Definition Document.md`. Full feasibility/risk analysis b
 ## Phase 0 — De-risking spikes
 Goal: answer the unknowns that could reshape scope, before investing in build-out. No production code required for these.
 
-- [ ] **0.1 BLE capability investigation.** Using a generic BLE scanner app (e.g. nRF Connect or LightBlue) on the iPhone, scan the JTX Sprint 6 and record: does it advertise BLE at all, what services/characteristics exist, is FTMS (`0x1826`) present, and — critically — is anything writable (not just readable)? Write findings to `docs/ble-findings.md`. **This determines whether Phase 4 (planned-mode auto-control) is buildable as scoped, or needs to be redefined as a read-only/cueing feature.**
+- [x] **0.1 BLE capability investigation.** Using a generic BLE scanner app (e.g. nRF Connect or LightBlue) on the iPhone, scan the JTX Sprint 6 and record: does it advertise BLE at all, what services/characteristics exist, is FTMS (`0x1826`) present, and — critically — is anything writable (not just readable)? Write findings to `docs/ble-findings.md`. **This determines whether Phase 4 (planned-mode auto-control) is buildable as scoped, or needs to be redefined as a read-only/cueing feature.** — Done, see `docs/ble-findings.md`. Result: writable control exists (proprietary `0xFFF2`), and standard FTMS is present for read/notify telemetry. Full auto-control remains in scope.
 - [ ] **0.2 Bluefy + VoiceOver spot check.** Confirm Bluefy's device-picker and permission dialogs are usable with VoiceOver on the target iPhone. Note any friction.
 - [ ] **0.3 Repo/deploy scaffolding.** Decide tech approach (plan: plain HTML/CSS/JS, no build step, to keep GitHub Pages deploy trivial — revisit only if a real need for a framework emerges). Enable GitHub Pages on the repo. Deploy a minimal static "hello world" page and confirm it loads on the iPhone via Bluefy.
 
@@ -61,3 +61,4 @@ Goal: PDD Ref #4 and #8. **Before starting, revisit Phase 0.1's findings and cho
 
 ## Session Log
 - **2026-08-08**: Feasibility review completed prior to this plan. Key findings carried forward: (a) JTX Sprint 6 BLE writable-control is unverified — JTX's own connectivity guide doesn't list the Sprint 6 at all, only Sprint-7/8 Pro/9 — hence Phase 0.1 gates Phase 4; (b) iOS drops/throttles BLE on screen-lock or backgrounding — hence Phase 5.1; (c) Strava's client_secret can't be fully hidden in a static site — user accepted this risk (public repo, unpublicized URL, rotate secret if leaked) — hence Phase 3.1's approach; (d) Bluefy is the only Web Bluetooth path on iOS (Safari doesn't support it) and is a single third-party dependency; (e) simultaneous Spotify + treadmill BLE is technically sound (independent Bluetooth roles) — added to PDD as Ref #10.
+- **2026-08-08**: Completed 0.1 via LightBlue scan (screenshots in `docs/ble-screenshots/`, write-up in `docs/ble-findings.md`). Treadmill advertises as `iConsole+0168`. Two relevant services: proprietary `0xFFF0` (notify `0xFFF1` + write `0xFFF2` — the iConsole protocol, undocumented but a known/previously-reverse-engineered pattern) and standard FTMS `0x1826` (read/notify only — no Control Point, so telemetry-only via `0x2ACD` Treadmill Data, but that's the officially documented format so easy to decode). Net result: writable control exists, so Phase 4 auto-control stays in scope, but will need the proprietary `0xFFF2` command format rather than standard FTMS control — research existing open-source iConsole reverse-engineering before attempting from scratch. A separate OTA/DFU service was also found and should be left alone (firmware-flashing, not control).
