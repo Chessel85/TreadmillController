@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Treadmill Protocol Tester</title>
+    <style>
+        :root { color-scheme: light; }
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 16px;
+            background: #fff;
+            color: #111;
+        }
+        h1 { font-size: 1.4rem; }
+        p.intro { font-weight: bold; background: #fff3cd; padding: 12px; border-radius: 8px; }
+        button {
+            display: block;
+            width: 100%;
+            padding: 20px;
+            margin: 10px 0;
+            font-size: 1.2rem;
+            font-weight: bold;
+            border: 3px solid #000;
+            border-radius: 12px;
+            background: #f8f8f8;
+        }
+        button:disabled { opacity: 0.5; }
+        #connectButton { background: #e7f3ff; }
+        #status {
+            font-weight: bold;
+            text-align: center;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 8px;
+            background: #f0f0f0;
+        }
+        #discoverySummary {
+            margin: 10px 0;
+            padding: 14px;
+            border-radius: 8px;
+            background: #f0f0f0;
+        }
+        fieldset {
+            border: 3px solid #333;
+            border-radius: 12px;
+            padding: 12px;
+            margin: 16px 0;
+        }
+        fieldset:disabled { opacity: 0.5; }
+        legend { font-weight: bold; padding: 0 6px; }
+        label { display: block; font-weight: bold; margin: 10px 0 6px; }
+        select, input[type="text"] {
+            width: 100%;
+            font-size: 1rem;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        #presetRow button { background: #fef0d9; padding: 12px; font-size: 1rem; }
+        #historyLog {
+            font-family: monospace;
+            font-size: 0.8rem;
+            background: #111;
+            color: #6f6;
+            padding: 10px;
+            border-radius: 8px;
+            max-height: 220px;
+            overflow-y: auto;
+            margin: 10px 0;
+            white-space: pre-wrap;
+        }
+        .sr-only {
+            position: absolute; width: 1px; height: 1px; padding: 0;
+            margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0;
+        }
+        a { display: block; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Treadmill Protocol Tester</h1>
+    <p class="intro">Diagnostic tool for finding the JTX Sprint 6's real control commands. Do not stand on the treadmill while testing — every command sent here is an unconfirmed guess.</p>
+
+    <div id="status" role="status">Not connected</div>
+    <button id="connectButton" type="button">Connect to treadmill</button>
+
+    <div id="discoverySummary" role="status" hidden></div>
+
+    <fieldset id="sendRow" disabled>
+        <legend>Send a command</legend>
+
+        <label for="targetSelect">Target characteristic</label>
+        <select id="targetSelect"></select>
+
+        <div id="presetRow"></div>
+
+        <label for="commandInput">Hex bytes to send (e.g. f0a5010102)</label>
+        <input type="text" id="commandInput" placeholder="f0a5010102" autocomplete="off">
+        <button id="sendButton" type="button">Send command</button>
+    </fieldset>
+
+    <div id="historyLabel" hidden><strong>History (for reference — the spoken outcome above each send is the primary feedback)</strong></div>
+    <div id="historyLog" role="log" hidden></div>
+    <button id="clearHistoryButton" type="button" hidden>Clear history</button>
+
+    <div id="instructionRegion" aria-live="assertive" class="sr-only"></div>
+
+    <a href="index.html">Back to Treadmill Controller</a>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const connectButton = document.getElementById('connectButton');
+        const discoverySummary = document.getElementById('discoverySummary');
+        const sendRow = document.getElementById('sendRow');
+        const targetSelect = document.getElementById('targetSelect');
+        const presetRow = document.getElementById('presetRow');
+        const commandInput = document.getElementById('commandInput');
+        const sendButton = document.getElementById('sendButton');
+        const historyLabel = document.getElementById('historyLabel');
+        const historyLog = document.getElementById('historyLog');
+        const clearHistoryButton = document.getElementById('clearHistoryButton');
+        const instructionRegion = document.getElementById('instructionRegion');
+
+        function announce(message) {
+            instructionRegion.textContent = '';
+            requestAnimationFrame(() => { instructionRegion.textContent = message; });
+        }
+
+        function setStatus(message) {
+            statusEl.textContent = message;
+        }
+
+        function describeError(error) {
+            let text = String(error);
+            try {
+                const keys = Object.getOwnPropertyNames(Object(error));
+                const details = keys
+                    .filter(k => k !== 'stack')
+                    .map(k => `${k}=${JSON.stringify(error[k])}`)
+                    .join(', ');
+                if (details) text += ` (${details})`;
+            } catch (e) { /* ignore */ }
+            return text;
+        }
+
+        function hexToBytes(hexString) {
+            const clean = hexString.replace(/[^0-9a-fA-F]/g, '');
+            if (clean.length === 0 || clean.length % 2 !== 0) return null;
+            const bytes = new Uint8Array(clean.length / 2);
+            for (let i = 0; i < bytes.length; i++) {
+                bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+            }
+            return bytes;
+        }
+
+        function bytesToHex(bytes) {
+            const out = [];
+            for (let i = 0; i < bytes.byteLength; i++) {
+                out.push(bytes.getUint8 ? bytes.getUint8(i).toString(16).padStart(2, '0') : bytes[i].toString(16).padStart(2, '0'));
+            }
+            return out.join(' ');
+        }
+
+        function logHistory(message) {
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            historyLog.appendChild(line);
+            while (historyLog.children.length > 40) historyLog.removeChild(historyLog.firstChild);
+            historyLog.scrollTop = historyLog.scrollHeight;
+        }
+
+        // Every service here is one we already knew existed (docs/ble-findings.md,
+        // from a LightBlue scan) — Web Bluetooth only allows requesting/discovering
+        // services listed in requestDevice()'s optionalServices, it can't wildcard
+        // every service on the device. getCharacteristics() with no argument DOES
+        // return every characteristic of an already-granted service though, so this
+        // re-checks (rather than assumes) what's actually writable/notifiable right
+        // now — e.g. confirms whether a standard FTMS Control Point (0x2AD9) exists,
+        // since the manual's Zwift-compatibility mention raised that question.
+        // The custom OTA/firmware-update service is deliberately NOT probed — writing
+        // to it could brick the console, and it's not a control channel anyway.
+        const CANDIDATE_SERVICES = [
+            { uuid: '0000fff0-0000-1000-8000-00805f9b34fb', label: 'iConsole proprietary (0xFFF0)' },
+            { uuid: '00001826-0000-1000-8000-00805f9b34fb', label: 'Fitness Machine Service / FTMS (0x1826)' },
+            { uuid: '0000180a-0000-1000-8000-00805f9b34fb', label: 'Device Information (0x180A)' }
+        ];
+
+        // Candidate command bytes are only known-good for *other* iConsole units —
+        // quick-fill starting points for manual testing, not verified commands.
+        const PROTOCOL_PRESETS = [
+            { label: 'f0 c3 03 00 00 00 b6 — triggered a response on a different iConsole treadmill (unconfirmed here)', hex: 'f0c303000000b6' },
+            { label: 'f0 a0 02 02 94 — iConsole+ bike "init" handshake, checksum = sum of preceding bytes mod 256 (unconfirmed for treadmills)', hex: 'f0a0020294' },
+            { label: 'f0 a0 01 01 92 — iConsole+ bike "ping", same checksum style (unconfirmed for treadmills)', hex: 'f0a0010192' }
+        ];
+
+        let device = null;
+        let gattServer = null;
+        let writableTargets = []; // [{ uuid, label, characteristic }]
+        let pendingResponses = [];
+        let awaitingResponse = false;
+
+        function handleNotify(sourceLabel, event) {
+            const hex = bytesToHex(event.target.value);
+            logHistory(`${sourceLabel} notified: ${hex}`);
+            if (awaitingResponse) pendingResponses.push(`${sourceLabel}: ${hex}`);
+        }
+
+        async function discoverAndSubscribe() {
+            writableTargets = [];
+            const summaryLines = [];
+
+            for (const candidate of CANDIDATE_SERVICES) {
+                try {
+                    const service = await gattServer.getPrimaryService(candidate.uuid);
+                    const characteristics = await service.getCharacteristics();
+                    const charDescriptions = [];
+
+                    for (const characteristic of characteristics) {
+                        const shortUuid = characteristic.uuid.slice(4, 8).toUpperCase();
+                        const props = [];
+                        if (characteristic.properties.read) props.push('read');
+                        if (characteristic.properties.write) props.push('write');
+                        if (characteristic.properties.writeWithoutResponse) props.push('write-no-response');
+                        if (characteristic.properties.notify) props.push('notify');
+                        if (characteristic.properties.indicate) props.push('indicate');
+                        charDescriptions.push(`${shortUuid} (${props.join(', ') || 'no properties'})`);
+
+                        if (characteristic.properties.write || characteristic.properties.writeWithoutResponse) {
+                            writableTargets.push({
+                                uuid: characteristic.uuid,
+                                label: `${shortUuid} — ${candidate.label}`,
+                                characteristic
+                            });
+                        }
+                        if (characteristic.properties.notify || characteristic.properties.indicate) {
+                            try {
+                                await characteristic.startNotifications();
+                                const sourceLabel = `${shortUuid} (${candidate.label})`;
+                                characteristic.addEventListener('characteristicvaluechanged', (event) => handleNotify(sourceLabel, event));
+                            } catch (notifyError) {
+                                console.error('Failed to subscribe to notifications', notifyError);
+                            }
+                        }
+                    }
+
+                    summaryLines.push(`${candidate.label}: ${charDescriptions.join(', ')}`);
+                } catch (error) {
+                    // Service not present on this device — fine, just skip it.
+                }
+            }
+
+            discoverySummary.hidden = false;
+            discoverySummary.textContent = summaryLines.length > 0
+                ? summaryLines.join(' | ')
+                : 'No candidate services found.';
+            announce(summaryLines.length > 0
+                ? `Discovered: ${summaryLines.join('. ')}`
+                : 'No candidate services found on this device.');
+
+            targetSelect.innerHTML = '';
+            writableTargets.forEach(target => {
+                const option = document.createElement('option');
+                option.value = target.uuid;
+                option.textContent = target.label;
+                targetSelect.appendChild(option);
+            });
+
+            presetRow.innerHTML = '';
+            PROTOCOL_PRESETS.forEach(preset => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = preset.label;
+                button.addEventListener('click', () => {
+                    commandInput.value = preset.hex;
+                    commandInput.focus();
+                });
+                presetRow.appendChild(button);
+            });
+
+            sendRow.disabled = writableTargets.length === 0;
+            historyLabel.hidden = false;
+            historyLog.hidden = false;
+            clearHistoryButton.hidden = false;
+        }
+
+        function onDisconnected() {
+            gattServer = null;
+            writableTargets = [];
+            connectButton.disabled = false;
+            connectButton.textContent = 'Connect to treadmill';
+            sendRow.disabled = true;
+            discoverySummary.hidden = true;
+            setStatus('Not connected');
+            announce('Treadmill disconnected.');
+        }
+
+        connectButton.addEventListener('click', async () => {
+            connectButton.disabled = true;
+            setStatus('Scanning for treadmill…');
+            announce('Scanning for treadmill.');
+
+            try {
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'iConsole' }],
+                    optionalServices: CANDIDATE_SERVICES.map(s => s.uuid)
+                });
+            } catch (error) {
+                connectButton.disabled = false;
+                const message = error && error.name === 'NotFoundError'
+                    ? 'No treadmill selected.'
+                    : `Scan failed: ${describeError(error)}`;
+                setStatus(message);
+                announce(message);
+                return;
+            }
+
+            const deviceName = device.name || 'treadmill';
+            setStatus(`Found ${deviceName}. Connecting…`);
+            announce(`Found ${deviceName}. Connecting.`);
+            device.addEventListener('gattserverdisconnected', onDisconnected);
+
+            try {
+                gattServer = await device.gatt.connect();
+            } catch (error) {
+                connectButton.disabled = false;
+                const message = `Could not connect to ${deviceName}: ${describeError(error)}`;
+                setStatus(message);
+                announce(message);
+                return;
+            }
+
+            connectButton.textContent = 'Connected';
+            setStatus(`Connected to ${deviceName}. Discovering services…`);
+            announce(`Connected to ${deviceName}. Discovering services.`);
+
+            await discoverAndSubscribe();
+            setStatus(`Connected to ${deviceName}.`);
+        });
+
+        if (!navigator.bluetooth) {
+            connectButton.disabled = true;
+            setStatus('Web Bluetooth is not available in this browser.');
+        }
+
+        sendButton.addEventListener('click', async () => {
+            const bytes = hexToBytes(commandInput.value);
+            if (!bytes) {
+                announce('Invalid hex — enter pairs of hex digits, for example f0a5010102.');
+                return;
+            }
+            const target = writableTargets.find(t => t.uuid === targetSelect.value);
+            if (!target) {
+                announce('No target characteristic selected.');
+                return;
+            }
+
+            pendingResponses = [];
+            awaitingResponse = true;
+            logHistory(`Sending to ${target.label}: ${bytesToHex(bytes)}`);
+
+            try {
+                if (target.characteristic.properties.writeWithoutResponse) {
+                    await target.characteristic.writeValueWithoutResponse(bytes);
+                } else {
+                    await target.characteristic.writeValue(bytes);
+                }
+            } catch (error) {
+                awaitingResponse = false;
+                const message = `Send failed: ${describeError(error)}`;
+                logHistory(message);
+                announce(message);
+                return;
+            }
+
+            announce(`Sent ${bytes.length} bytes to ${target.label}. Listening for a response for 3 seconds.`);
+
+            setTimeout(() => {
+                awaitingResponse = false;
+                if (pendingResponses.length === 0) {
+                    logHistory('No response within 3 seconds.');
+                    announce('No response received within 3 seconds.');
+                } else {
+                    const summary = pendingResponses.join('; ');
+                    announce(`Response: ${summary}`);
+                }
+            }, 3000);
+        });
+
+        clearHistoryButton.addEventListener('click', () => {
+            historyLog.innerHTML = '';
+        });
+    </script>
+</body>
+</html>
