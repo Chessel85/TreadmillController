@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Pegasus</title>
+    <title>Treadmill Controller — Minotaur</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -109,10 +109,32 @@
         }
         #planSummary.plan-error { background: #fdeaea; }
         #planLibraryList button { background: #f4f0ff; }
+        #protocolTestRow { background: #fff8e6; }
+        #protocolTestRow p { margin: 0 0 10px; font-weight: bold; }
+        #protocolTestRow input[type="text"] {
+            width: 100%;
+            font-size: 1rem;
+            padding: 10px;
+            box-sizing: border-box;
+            margin-bottom: 10px;
+        }
+        #protocolPresets button { background: #fef0d9; padding: 12px; font-size: 1rem; }
+        #protocolLog {
+            font-family: monospace;
+            font-size: 0.8rem;
+            background: #111;
+            color: #6f6;
+            padding: 10px;
+            border-radius: 8px;
+            max-height: 180px;
+            overflow-y: auto;
+            margin: 10px 0;
+            white-space: pre-wrap;
+        }
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Pegasus</h1>
+    <h1>Treadmill Controller — Minotaur</h1>
 
     <div id="status" role="status">Not connected</div>
 
@@ -134,6 +156,17 @@
     </fieldset>
 
     <button id="changeModeButton" type="button" hidden>Change mode</button>
+
+    <fieldset id="protocolTestRow" hidden>
+        <legend>iConsole protocol tester (advanced)</legend>
+        <p>For discovering your treadmill's real write-command bytes. Stand clear of the treadmill while testing — commands sent here are unconfirmed guesses, not verified controls.</p>
+        <div id="protocolPresets"></div>
+        <label for="protocolCommandInput">Hex bytes to send to 0xFFF2 (e.g. f0a5010102)</label>
+        <input type="text" id="protocolCommandInput" placeholder="f0a5010102" autocomplete="off">
+        <button id="protocolSendButton" type="button">Send command</button>
+        <div id="protocolLog" role="log"></div>
+        <button id="protocolClearLogButton" type="button">Clear log</button>
+    </fieldset>
 
     <div id="plannedNotice" role="status" hidden>Planned mode selected. Choose a plan file below to load it — driving the treadmill from a plan is coming in a future update.</div>
 
@@ -190,6 +223,12 @@
         const planSummary = document.getElementById('planSummary');
         const planLibraryRow = document.getElementById('planLibraryRow');
         const planLibraryList = document.getElementById('planLibraryList');
+        const protocolTestRow = document.getElementById('protocolTestRow');
+        const protocolPresets = document.getElementById('protocolPresets');
+        const protocolCommandInput = document.getElementById('protocolCommandInput');
+        const protocolSendButton = document.getElementById('protocolSendButton');
+        const protocolLog = document.getElementById('protocolLog');
+        const protocolClearLogButton = document.getElementById('protocolClearLogButton');
 
         let sessionMode = null; // 'manual' | 'planned'
         let currentPlan = null; // array of {inclinePercent, speedKmh, durationSeconds} once a plan file has loaded and validated cleanly (Phase 4.1) — driving the treadmill from it is Phase 4.3
@@ -443,6 +482,8 @@
         const FTMS_SERVICE_UUID = '00001826-0000-1000-8000-00805f9b34fb';
         const DEVICE_INFO_SERVICE_UUID = '0000180a-0000-1000-8000-00805f9b34fb';
         const TREADMILL_DATA_CHARACTERISTIC_UUID = '00002acd-0000-1000-8000-00805f9b34fb';
+        const ICONSOLE_NOTIFY_CHARACTERISTIC_UUID = '0000fff1-0000-1000-8000-00805f9b34fb';
+        const ICONSOLE_WRITE_CHARACTERISTIC_UUID = '0000fff2-0000-1000-8000-00805f9b34fb';
 
         let device = null;
         let gattServer = null;
@@ -450,6 +491,8 @@
         let telemetryAvailable = false;
         let lastReading = null;
         let lastLoggedReading = null;
+        let iconsoleWriteChar = null;
+        let iconsoleNotifyChar = null;
         let sessionLog = []; // [{ atSeconds, speedKmh, inclinePercent }, ...] — logged only while running (PDD Ref #5)
 
         // Local session storage (PDD-adjacent Phase 2.3): the in-progress/finished
@@ -689,6 +732,110 @@ ${trackpointsXml}
             }
         }
 
+        // Phase 4.3 groundwork: the 0xFFF2 write protocol for this specific console
+        // isn't confirmed (see IMPLEMENTATION_PLAN.md's Session Log) — open-source
+        // references cover different iConsole firmware variants, not this exact
+        // unit. Rather than guess-and-ship real control, this exposes a raw
+        // hex-command sender + a live log of the 0xFFF1 notify stream so the real
+        // command bytes can be discovered safely (treadmill stationary, no rider)
+        // before anything is wired into an actual auto-driven session.
+        function hexToBytes(hexString) {
+            const clean = hexString.replace(/[^0-9a-fA-F]/g, '');
+            if (clean.length === 0 || clean.length % 2 !== 0) return null;
+            const bytes = new Uint8Array(clean.length / 2);
+            for (let i = 0; i < bytes.length; i++) {
+                bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+            }
+            return bytes;
+        }
+
+        function bytesToHex(bytes) {
+            const out = [];
+            for (let i = 0; i < bytes.byteLength; i++) {
+                out.push(bytes.getUint8 ? bytes.getUint8(i).toString(16).padStart(2, '0') : bytes[i].toString(16).padStart(2, '0'));
+            }
+            return out.join(' ');
+        }
+
+        function logProtocolMessage(message) {
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            protocolLog.appendChild(line);
+            while (protocolLog.children.length > 20) protocolLog.removeChild(protocolLog.firstChild);
+            protocolLog.scrollTop = protocolLog.scrollHeight;
+        }
+
+        function handleIconsoleNotify(event) {
+            logProtocolMessage(`Received: ${bytesToHex(event.target.value)}`);
+        }
+
+        // Candidate command bytes are only known-good for *other* iConsole units —
+        // included as quick-fill starting points for manual testing, not as
+        // verified commands for this treadmill.
+        const PROTOCOL_PRESETS = [
+            { label: 'f0 c3 03 00 00 00 b6 — observed to trigger a response on a different iConsole treadmill (unconfirmed here)', hex: 'f0c303000000b6' },
+            { label: 'f0 a0 02 02 94 — iConsole+ bike "init" handshake, checksum = sum of preceding bytes mod 256 (unconfirmed for treadmills)', hex: 'f0a0020294' },
+            { label: 'f0 a0 01 01 92 — iConsole+ bike "ping", same checksum style (unconfirmed for treadmills)', hex: 'f0a0010192' }
+        ];
+
+        function renderProtocolPresets() {
+            protocolPresets.innerHTML = '';
+            PROTOCOL_PRESETS.forEach(preset => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = preset.label;
+                button.addEventListener('click', () => {
+                    protocolCommandInput.value = preset.hex;
+                    protocolCommandInput.focus();
+                });
+                protocolPresets.appendChild(button);
+            });
+        }
+
+        async function subscribeToIconsoleProtocol() {
+            try {
+                const iconsoleService = await gattServer.getPrimaryService(ICONSOLE_SERVICE_UUID);
+                iconsoleWriteChar = await iconsoleService.getCharacteristic(ICONSOLE_WRITE_CHARACTERISTIC_UUID);
+                iconsoleNotifyChar = await iconsoleService.getCharacteristic(ICONSOLE_NOTIFY_CHARACTERISTIC_UUID);
+                await iconsoleNotifyChar.startNotifications();
+                iconsoleNotifyChar.addEventListener('characteristicvaluechanged', handleIconsoleNotify);
+                renderProtocolPresets();
+                protocolTestRow.hidden = false;
+            } catch (error) {
+                console.error('iConsole protocol channel unavailable', error);
+                iconsoleWriteChar = null;
+                iconsoleNotifyChar = null;
+                protocolTestRow.hidden = true;
+            }
+        }
+
+        protocolSendButton.addEventListener('click', async () => {
+            const bytes = hexToBytes(protocolCommandInput.value);
+            if (!bytes) {
+                logProtocolMessage('Invalid hex — enter pairs of hex digits, e.g. f0a5010102.');
+                return;
+            }
+            if (!iconsoleWriteChar) {
+                logProtocolMessage('Write channel not available.');
+                return;
+            }
+            try {
+                await iconsoleWriteChar.writeValueWithoutResponse(bytes);
+                logProtocolMessage(`Sent (no response): ${bytesToHex(bytes)}`);
+            } catch (error) {
+                try {
+                    await iconsoleWriteChar.writeValue(bytes);
+                    logProtocolMessage(`Sent (with response): ${bytesToHex(bytes)}`);
+                } catch (error2) {
+                    logProtocolMessage(`Send failed: ${describeError(error2)}`);
+                }
+            }
+        });
+
+        protocolClearLogButton.addEventListener('click', () => {
+            protocolLog.innerHTML = '';
+        });
+
         function setConnectButtonState(state) {
             if (state === 'idle') {
                 connectButton.disabled = false;
@@ -737,6 +884,10 @@ ${trackpointsXml}
             telemetryAvailable = false;
             lastReading = null;
             telemetryDisplay.hidden = true;
+            iconsoleWriteChar = null;
+            iconsoleNotifyChar = null;
+            protocolTestRow.hidden = true;
+            protocolLog.innerHTML = '';
             setConnectButtonState('idle');
             resetModeSelection();
             setStatus('Not connected');
@@ -790,6 +941,7 @@ ${trackpointsXml}
             announce(`Connected to ${deviceName}. Choose a session mode.`);
 
             await subscribeToTelemetry();
+            await subscribeToIconsoleProtocol();
         });
 
         if (!navigator.bluetooth) {
