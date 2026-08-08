@@ -1,3 +1,14 @@
+<!--
+    Reference only — not part of the Treadmill Controller app.
+    This is a working, VoiceOver/Bluefy-tested page for a different BLE fitness
+    device (a Wahoo KICKR bike trainer), hosted separately on its own repo/Pages
+    site. Kept here for patterns worth reusing: the connect-flow markup, the
+    session/timer state handling, and the plan-file text format + parser +
+    GitHub-contents-API file listing (see docs/README.md for where each applies).
+    Do not deploy this file as-is; it targets Wahoo's BLE service/characteristic
+    UUIDs and a power-based (watts) workout format, not this treadmill's
+    speed/incline iConsole protocol (see ../ble-findings.md).
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>

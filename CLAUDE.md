@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-This repository currently contains only a product definition document (`Product Definition Document.md`). No application code, build tooling, or tests exist yet. There are no build/lint/test commands to run until code is added — do not invent them.
+Phase 0 (de-risking spikes) is complete — see `docs/` for findings and `IMPLEMENTATION_PLAN.md`'s Session Log for details. GitHub Pages is live at https://chessel85.github.io/TreadmillController/, currently serving only a placeholder `index.html` ("hello world" deploy check). No real app code exists yet — Phase 1 (accessible shell & Bluetooth connect flow) is next. There are no build/lint/test commands — this is plain HTML/CSS/JS with no build step by design; do not invent tooling.
 
 **`IMPLEMENTATION_PLAN.md` is the authoritative, session-to-session task tracker for building this project.** At the start of any work session, read its Status section to see the current phase and next task, do that task, then check it off and update Status/Session Log before finishing — it's designed to be picked up cold across many separate sessions.
 
