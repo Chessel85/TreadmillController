@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Treadmill Controller — Leviathan</title>
+    <title>Treadmill Controller — Charybdis</title>
     <style>
         :root { color-scheme: light; }
         body {
@@ -113,7 +113,7 @@
     </style>
 </head>
 <body>
-    <h1>Treadmill Controller — Leviathan</h1>
+    <h1>Treadmill Controller — Charybdis</h1>
     <a href="protocol-tester.html" id="protocolTesterLink">Treadmill protocol tester (advanced/diagnostic tool)</a>
 
     <div id="status" role="status">Not connected</div>
@@ -156,7 +156,7 @@
         <span id="timerDisplay">0:00</span>
     </div>
 
-    <div id="telemetryDisplay" hidden>Speed: <span id="speedValue">–</span> km/h · Incline: <span id="inclineValue">–</span>%</div>
+    <div id="telemetryDisplay" hidden>Speed: <span id="speedValue">–</span> km/h · Incline: <span id="inclineValue">–</span>% · Distance: <span id="distanceValue">–</span> m</div>
 
     <div id="sessionButtonRow" class="button-row" hidden>
         <button id="pauseResumeButton" type="button">Pause</button>
@@ -183,6 +183,7 @@
         const telemetryDisplay = document.getElementById('telemetryDisplay');
         const speedValue = document.getElementById('speedValue');
         const inclineValue = document.getElementById('inclineValue');
+        const distanceValue = document.getElementById('distanceValue');
         const instructionRegion = document.getElementById('instructionRegion');
         const recoveredSessionNotice = document.getElementById('recoveredSessionNotice');
         const discardSavedSessionButton = document.getElementById('discardSavedSessionButton');
@@ -199,11 +200,32 @@
         let elapsedSeconds = 0;
         let timerInterval = null;
         let sessionStartTime = null; // Date — set on Start, used as the TCX activity's absolute timestamp base
+        let accumulatedPausedMs = 0; // total ms spent paused so far this session
+        let pauseStartedAt = null;   // Date — set entering 'paused', folded into accumulatedPausedMs on resume
 
         function formatTime(totalSeconds) {
             const mins = Math.floor(totalSeconds / 60);
             const secs = totalSeconds % 60;
             return `${mins}:${String(secs).padStart(2, '0')}`;
+        }
+
+        // Elapsed time is recomputed from real timestamps rather than counted by
+        // a per-tick increment, so a setInterval that's throttled or suspended
+        // while Bluefy is backgrounded (e.g. during a Siri interruption) doesn't
+        // cause the displayed/logged duration to drift — whenever this next runs,
+        // it catches up to the true wall-clock value in one step.
+        function computeElapsedSeconds() {
+            if (!sessionStartTime) return 0;
+            const now = Date.now();
+            const pausedMs = accumulatedPausedMs
+                + (sessionState === 'paused' && pauseStartedAt ? now - pauseStartedAt.getTime() : 0);
+            return Math.max(0, Math.floor((now - sessionStartTime.getTime() - pausedMs) / 1000));
+        }
+
+        function refreshElapsedDisplay() {
+            elapsedSeconds = computeElapsedSeconds();
+            timerDisplay.textContent = formatTime(elapsedSeconds);
+            saveSessionToStorage();
         }
 
         function announce(message) {
@@ -446,6 +468,13 @@
         const DEVICE_INFO_SERVICE_UUID = '0000180a-0000-1000-8000-00805f9b34fb';
         const TREADMILL_DATA_CHARACTERISTIC_UUID = '00002acd-0000-1000-8000-00805f9b34fb';
 
+        // Reconnect backoff after an unexpected disconnect (Siri/timer/call
+        // backgrounding Bluefy) — short delays first to catch brief interruptions
+        // fast, settling to 30s so a longer phone call doesn't burn battery, capped
+        // by an overall window after which we give up and ask the user to retry.
+        const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+        const MAX_RECONNECT_WINDOW_MS = 6 * 60 * 1000;
+
         let device = null;
         let gattServer = null;
         let treadmillDataChar = null;
@@ -453,6 +482,12 @@
         let lastReading = null;
         let lastLoggedReading = null;
         let sessionLog = []; // [{ atSeconds, speedKmh, inclinePercent }, ...] — logged only while running (PDD Ref #5)
+        let lastKnownTotalDistanceMeters = null; // most recent Total Distance reading from the treadmill, if it reports one
+        let sessionStartDistanceMeters = null;   // snapshot near Start, so exported distance is a delta — the
+                                                  // treadmill's own odometer isn't assumed to be zero at our Start tap
+        let reconnectTimer = null;    // setTimeout handle for the next scheduled reconnect attempt
+        let reconnectDeadline = null; // Date.now()-style cutoff; give up once passed
+        let wakeLock = null;
 
         // Local session storage (PDD-adjacent Phase 2.3): the in-progress/finished
         // session is written to localStorage as it changes, independent of the
@@ -538,8 +573,18 @@
         // (no-GPS) run. Only time and distance are included, per PDD Ref #5/#9;
         // TCX has no standard incline field, and detailed speed/incline history
         // stays available in the app's own telemetry log rather than the export.
-        function buildSessionTcx(startTime, log, totalElapsedSeconds) {
-            const { points, totalDistanceMeters } = buildTcxTrackpoints(log, totalElapsedSeconds);
+        function buildSessionTcx(startTime, log, totalElapsedSeconds, treadmillReportedDistanceMeters) {
+            const { points, totalDistanceMeters: integratedDistanceMeters } = buildTcxTrackpoints(log, totalElapsedSeconds);
+            // Prefer the treadmill's own reported distance (survives BLE gaps — its
+            // odometer keeps counting regardless of our connection state) over
+            // integrating held speed values across sessionLog segments, which was
+            // the only distance source before and is only ever an approximation.
+            // Individual <Trackpoint> distances below still come from the segment
+            // integration (detail-only, per PDD — not what Strava reads) and so
+            // won't necessarily sum to this Lap-level total; that's expected.
+            const totalDistanceMeters = (treadmillReportedDistanceMeters !== null && treadmillReportedDistanceMeters !== undefined)
+                ? treadmillReportedDistanceMeters
+                : integratedDistanceMeters;
             const isoStart = toIsoSeconds(startTime);
             const trackpointsXml = points.map(p => {
                 const pointTime = toIsoSeconds(new Date(startTime.getTime() + p.atSeconds * 1000));
@@ -591,7 +636,10 @@ ${trackpointsXml}
 
         async function shareOrDownloadSessionFile() {
             const startTime = sessionStartTime || new Date(Date.now() - elapsedSeconds * 1000);
-            const content = buildSessionTcx(startTime, sessionLog, elapsedSeconds);
+            const treadmillReportedDistanceMeters = (lastKnownTotalDistanceMeters !== null && sessionStartDistanceMeters !== null)
+                ? Math.max(0, lastKnownTotalDistanceMeters - sessionStartDistanceMeters)
+                : null;
+            const content = buildSessionTcx(startTime, sessionLog, elapsedSeconds, treadmillReportedDistanceMeters);
             const filename = `treadmill-session-${toIsoSeconds(startTime).replace(/[:.]/g, '-')}.tcx`;
 
             // Bluefy's browser engine may not support sharing files via the Web
@@ -626,9 +674,15 @@ ${trackpointsXml}
         });
 
         // Decodes the FTMS Treadmill Data characteristic (Bluetooth SIG GATT spec,
-        // 0x2ACD). Only Instantaneous Speed and Inclination are extracted — other
-        // optional fields (average speed, total distance, etc.) are still walked
-        // over in spec order so the byte offset lands correctly on Inclination.
+        // 0x2ACD). Walks every optional field in spec order per its own flag bit
+        // (not just enough to reach Inclination, as before) so Total Distance and
+        // Elapsed Time land at the correct offset regardless of which optional
+        // fields this specific unit happens to send — unconfirmed on this JTX
+        // Sprint 6 until checked on-device (see IMPLEMENTATION_PLAN.md).
+        // Note: the previous version under-skipped the Inclination field (only 2 of
+        // its 4 bytes — Inclination + Ramp Angle Setting are both sint16), which
+        // was harmless when nothing after it was ever read; fixed here since fields
+        // after it now need a correct offset.
         function decodeTreadmillData(dataView) {
             let offset = 0;
             const flags = dataView.getUint16(offset, true); offset += 2;
@@ -637,6 +691,14 @@ ${trackpointsXml}
             const avgSpeedPresent = (flags & 0x0002) !== 0;
             const totalDistancePresent = (flags & 0x0004) !== 0;
             const inclinePresent = (flags & 0x0008) !== 0;
+            const elevationGainPresent = (flags & 0x0010) !== 0;
+            const instantPacePresent = (flags & 0x0020) !== 0;
+            const avgPacePresent = (flags & 0x0040) !== 0;
+            const expendedEnergyPresent = (flags & 0x0080) !== 0;
+            const heartRatePresent = (flags & 0x0100) !== 0;
+            const metabolicEquivalentPresent = (flags & 0x0200) !== 0;
+            const elapsedTimePresent = (flags & 0x0400) !== 0;
+            const remainingTimePresent = (flags & 0x0800) !== 0;
 
             const reading = {};
 
@@ -645,11 +707,36 @@ ${trackpointsXml}
                 offset += 2;
             }
             if (avgSpeedPresent) offset += 2;
-            if (totalDistancePresent) offset += 3;
-            if (inclinePresent && offset + 2 <= dataView.byteLength) {
-                reading.inclinePercent = dataView.getInt16(offset, true) * 0.1;
-                offset += 2; // ramp angle setting follows, not needed
+            if (totalDistancePresent) {
+                if (offset + 3 <= dataView.byteLength) {
+                    // uint24 little-endian — no native DataView getter, assemble from bytes
+                    reading.totalDistanceMeters = dataView.getUint8(offset)
+                        | (dataView.getUint8(offset + 1) << 8)
+                        | (dataView.getUint8(offset + 2) << 16);
+                }
+                offset += 3;
             }
+            if (inclinePresent) {
+                if (offset + 2 <= dataView.byteLength) {
+                    reading.inclinePercent = dataView.getInt16(offset, true) * 0.1;
+                }
+                offset += 4; // inclination + ramp angle setting, only the former is needed
+            }
+            if (elevationGainPresent) offset += 4; // positive + negative elevation gain
+            if (instantPacePresent) offset += 1;
+            if (avgPacePresent) offset += 1;
+            if (expendedEnergyPresent) offset += 5; // total + per-hour (uint16 each) + per-minute (uint8)
+            if (heartRatePresent) offset += 1;
+            if (metabolicEquivalentPresent) offset += 1;
+            if (elapsedTimePresent) {
+                if (offset + 2 <= dataView.byteLength) {
+                    reading.elapsedTimeSeconds = dataView.getUint16(offset, true); // informational only, not used for TotalTimeSeconds
+                }
+                offset += 2;
+            }
+            if (remainingTimePresent) offset += 2;
+            // Force on Belt + Power Output (bit 12) intentionally not walked further —
+            // nothing after it in the spec is read by this app.
 
             return reading;
         }
@@ -658,12 +745,24 @@ ${trackpointsXml}
             telemetryDisplay.hidden = false;
             if (reading.speedKmh !== undefined) speedValue.textContent = reading.speedKmh.toFixed(1);
             if (reading.inclinePercent !== undefined) inclineValue.textContent = reading.inclinePercent.toFixed(1);
+            if (reading.totalDistanceMeters !== undefined) distanceValue.textContent = reading.totalDistanceMeters.toFixed(0);
         }
 
         function handleTreadmillData(event) {
             const reading = decodeTreadmillData(event.target.value);
             lastReading = reading;
             updateTelemetryDisplay(reading);
+
+            // Tracked whenever present, independent of session state, so the
+            // treadmill's own odometer reading is captured right after Start (before
+            // the first 'running' sample) and between reconnects — this is what the
+            // exported TCX's distance is based on, not the change-triggered log below.
+            if (reading.totalDistanceMeters !== undefined) {
+                lastKnownTotalDistanceMeters = reading.totalDistanceMeters;
+                if (sessionState === 'running' && sessionStartDistanceMeters === null) {
+                    sessionStartDistanceMeters = reading.totalDistanceMeters;
+                }
+            }
 
             if (sessionState !== 'running') return;
             const changed = !lastLoggedReading
@@ -691,6 +790,81 @@ ${trackpointsXml}
             }
         }
 
+        // Screen Wake Lock (Phase 5.1) — keeps the screen on during a session so
+        // iOS doesn't auto-lock and kill the BLE connection (confirmed during
+        // feasibility research that screen-lock drops BLE outright). Feature-detects
+        // and fails soft since Bluefy's support for this API isn't confirmed.
+        async function acquireWakeLock() {
+            if (!('wakeLock' in navigator) || wakeLock) return;
+            try {
+                wakeLock = await navigator.wakeLock.request('screen');
+                wakeLock.addEventListener('release', () => { wakeLock = null; });
+            } catch (error) {
+                console.error('Wake lock request failed', error); // non-fatal — session proceeds either way
+            }
+        }
+
+        function releaseWakeLock() {
+            if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+        }
+
+        // Reconnection (Phase 5.2) — a single primitive used by the first-ever
+        // connect, the automatic backoff loop below, a manual retry tap, and the
+        // visibilitychange handler, so all four paths behave identically on success.
+        async function attemptGattConnect() {
+            gattServer = await device.gatt.connect(); // throws on failure
+            await subscribeToTelemetry(); // already swallows its own errors, above
+        }
+
+        function onGattConnectSuccess() {
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            reconnectDeadline = null;
+            setConnectButtonState('connected');
+            refreshElapsedDisplay();
+
+            if (sessionState === 'idle') {
+                modeFieldset.disabled = false;
+                const name = device.name || 'treadmill';
+                setStatus(`Connected to ${name}. Choose a session mode.`);
+                announce(`Connected to ${name}. Choose a session mode.`);
+            } else {
+                setStatus('Reconnected. Session monitoring resumed.');
+                announce('Treadmill reconnected. Session recording has resumed.');
+            }
+        }
+
+        function onReconnectGiveUp() {
+            reconnectTimer = null;
+            reconnectDeadline = null;
+            setConnectButtonState('lost');
+            setStatus('Could not reconnect to the treadmill. Your session data is safe — tap Connect to try again.');
+            announce('Could not reconnect to the treadmill. Your session data is still safe. Tap Connect when ready to try again.');
+        }
+
+        function beginReconnectLoop() {
+            reconnectDeadline = Date.now() + MAX_RECONNECT_WINDOW_MS;
+            scheduleReconnectAttempt(0);
+        }
+
+        // Deliberately silent between attempts (no setStatus/announce here) — #status
+        // is an aria-live region, and narrating every retry would mean VoiceOver
+        // interrupts roughly every 2-30s during exactly the phone call the user is
+        // trying to have. Only the initial disconnect, success, and final give-up
+        // (in onDisconnected/onGattConnectSuccess/onReconnectGiveUp) are spoken.
+        function scheduleReconnectAttempt(attemptIndex) {
+            const delay = RECONNECT_DELAYS_MS[Math.min(attemptIndex, RECONNECT_DELAYS_MS.length - 1)];
+            reconnectTimer = setTimeout(async () => {
+                try {
+                    await attemptGattConnect();
+                    onGattConnectSuccess();
+                } catch (error) {
+                    console.error('Reconnect attempt failed', error);
+                    if (Date.now() >= reconnectDeadline) { onReconnectGiveUp(); return; }
+                    scheduleReconnectAttempt(attemptIndex + 1);
+                }
+            }, delay);
+        }
+
         function setConnectButtonState(state) {
             if (state === 'idle') {
                 connectButton.disabled = false;
@@ -700,6 +874,12 @@ ${trackpointsXml}
             } else if (state === 'connected') {
                 connectButton.disabled = true;
                 connectButton.textContent = 'Connected';
+            } else if (state === 'reconnecting') {
+                connectButton.disabled = true;
+                connectButton.textContent = 'Reconnecting…';
+            } else if (state === 'lost') {
+                connectButton.disabled = false;
+                connectButton.textContent = 'Reconnect to treadmill';
             }
         }
 
@@ -708,6 +888,8 @@ ${trackpointsXml}
             timerInterval = null;
             sessionState = 'idle';
             elapsedSeconds = 0;
+            accumulatedPausedMs = 0;
+            pauseStartedAt = null;
             timerDisplay.textContent = formatTime(0);
             timerContainer.hidden = true;
             sessionButtonRow.hidden = true;
@@ -715,6 +897,8 @@ ${trackpointsXml}
             sessionLog = [];
             lastLoggedReading = null;
             sessionStartTime = null;
+            sessionStartDistanceMeters = null;
+            releaseWakeLock();
             shareSessionButton.hidden = true;
         }
 
@@ -739,13 +923,50 @@ ${trackpointsXml}
             telemetryAvailable = false;
             lastReading = null;
             telemetryDisplay.hidden = true;
-            setConnectButtonState('idle');
-            resetModeSelection();
-            setStatus('Not connected');
-            announce('Treadmill disconnected.');
+
+            if (sessionState === 'idle') {
+                setConnectButtonState('idle');
+                resetModeSelection();
+                setStatus('Not connected');
+                announce('Treadmill disconnected.');
+                return;
+            }
+
+            // A session is active or just finished — its data must survive this.
+            // sessionLog/elapsedSeconds/sessionStartTime/lastKnownTotalDistanceMeters
+            // etc. are deliberately left untouched; only live-telemetry bookkeeping
+            // above is cleared. Try to get back to a live connection automatically.
+            setConnectButtonState('reconnecting');
+            setStatus('Treadmill disconnected. Session data is safe — reconnecting…');
+            announce('Treadmill disconnected. Your session is still being recorded. Reconnecting to the treadmill.');
+            beginReconnectLoop();
         }
 
         connectButton.addEventListener('click', async () => {
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; reconnectDeadline = null; }
+
+            // Once a device has been picked once, later taps (auto-retry, manual
+            // retry, or just "it dropped, tap Connect again") skip requestDevice()'s
+            // picker entirely — there's only ever one treadmill in this app's flow,
+            // and re-prompting is pure friction for a VoiceOver user.
+            if (device) {
+                setConnectButtonState('busy');
+                const name = device.name || 'treadmill';
+                setStatus(`Reconnecting to ${name}…`);
+                announce(`Reconnecting to ${name}.`);
+                try {
+                    await attemptGattConnect();
+                    onGattConnectSuccess();
+                } catch (error) {
+                    console.error('Manual reconnect failed', error);
+                    setConnectButtonState('lost');
+                    const message = `Could not reconnect to ${name}: ${describeError(error)}`;
+                    setStatus(message);
+                    announce(message);
+                }
+                return;
+            }
+
             setConnectButtonState('busy');
             setStatus('Scanning for treadmill…');
             announce('Scanning for treadmill.');
@@ -776,7 +997,7 @@ ${trackpointsXml}
             device.addEventListener('gattserverdisconnected', onDisconnected);
 
             try {
-                gattServer = await device.gatt.connect();
+                await attemptGattConnect();
             } catch (error) {
                 console.error('gatt.connect failed', error);
                 setConnectButtonState('idle');
@@ -786,12 +1007,7 @@ ${trackpointsXml}
                 return;
             }
 
-            setConnectButtonState('connected');
-            modeFieldset.disabled = false;
-            setStatus(`Connected to ${deviceName}. Choose a session mode.`);
-            announce(`Connected to ${deviceName}. Choose a session mode.`);
-
-            await subscribeToTelemetry();
+            onGattConnectSuccess();
         });
 
         if (!navigator.bluetooth) {
@@ -800,6 +1016,29 @@ ${trackpointsXml}
         }
 
         checkForSavedSession();
+
+        // Returning to Bluefy after being backgrounded (Siri, a timer alarm, a
+        // phone call) is the moment that matters most: wake locks auto-release
+        // while hidden so re-acquire one, refresh the timer display immediately
+        // rather than waiting for the next tick, and — since it's unverified
+        // whether Bluefy keeps running setTimeout callbacks while backgrounded —
+        // try reconnecting right away rather than relying solely on the backoff
+        // loop to have done it already.
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'visible') return;
+
+            if (sessionState === 'running' || sessionState === 'paused') {
+                refreshElapsedDisplay();
+                acquireWakeLock();
+            }
+
+            if (!gattServer && device && sessionState !== 'idle') {
+                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                attemptGattConnect().then(onGattConnectSuccess).catch(() => {
+                    scheduleReconnectAttempt(0);
+                });
+            }
+        });
 
         modeRadios.forEach(radio => {
             radio.addEventListener('change', () => {
@@ -877,7 +1116,10 @@ ${trackpointsXml}
 
             sessionState = 'running';
             elapsedSeconds = 0;
+            accumulatedPausedMs = 0;
+            pauseStartedAt = null;
             sessionStartTime = new Date();
+            sessionStartDistanceMeters = null;
             timerDisplay.textContent = formatTime(0);
             changeModeButton.hidden = true;
             startButton.hidden = true;
@@ -891,21 +1133,22 @@ ${trackpointsXml}
             if (lastReading) {
                 sessionLog.push({ atSeconds: 0, speedKmh: lastReading.speedKmh, inclinePercent: lastReading.inclinePercent });
                 lastLoggedReading = lastReading;
+                if (lastReading.totalDistanceMeters !== undefined) {
+                    sessionStartDistanceMeters = lastReading.totalDistanceMeters;
+                }
             }
 
-            timerInterval = setInterval(() => {
-                elapsedSeconds++;
-                timerDisplay.textContent = formatTime(elapsedSeconds);
-                saveSessionToStorage();
-            }, 1000);
+            timerInterval = setInterval(refreshElapsedDisplay, 1000);
+            acquireWakeLock();
 
             saveSessionToStorage();
             setStatus('Session running.');
-            announce('Session started.');
+            announce('Session started. Keep your phone unlocked and Bluefy in the foreground during the session so the connection stays alive.');
         });
 
         pauseResumeButton.addEventListener('click', () => {
             if (sessionState === 'running') {
+                pauseStartedAt = new Date();
                 sessionState = 'paused';
                 clearInterval(timerInterval);
                 pauseResumeButton.textContent = 'Resume';
@@ -913,12 +1156,11 @@ ${trackpointsXml}
                 setStatus('Session paused.');
                 announce('Session paused.');
             } else if (sessionState === 'paused') {
+                accumulatedPausedMs += Date.now() - pauseStartedAt.getTime();
+                pauseStartedAt = null;
                 sessionState = 'running';
-                timerInterval = setInterval(() => {
-                    elapsedSeconds++;
-                    timerDisplay.textContent = formatTime(elapsedSeconds);
-                    saveSessionToStorage();
-                }, 1000);
+                timerInterval = setInterval(refreshElapsedDisplay, 1000);
+                acquireWakeLock();
                 pauseResumeButton.textContent = 'Pause';
                 saveSessionToStorage();
                 setStatus('Session running.');
@@ -926,10 +1168,31 @@ ${trackpointsXml}
             }
         });
 
-        finishButton.addEventListener('click', () => {
+        finishButton.addEventListener('click', async () => {
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; reconnectDeadline = null; }
+
+            // Last chance at a fresh distance reading: if we're not currently
+            // connected, make one bounded attempt to reconnect before finalizing —
+            // better than exporting whatever was last known, possibly minutes ago.
+            if (!gattServer && device) {
+                setStatus('Reconnecting to get a final reading…');
+                announce('Reconnecting to get a final reading before finishing.');
+                try {
+                    await Promise.race([
+                        attemptGattConnect(),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+                    ]);
+                } catch (error) {
+                    console.error('Finish-time reconnect attempt failed', error);
+                }
+            }
+
             clearInterval(timerInterval);
             timerInterval = null;
+            refreshElapsedDisplay();
             sessionState = 'finished';
+            releaseWakeLock();
+            setConnectButtonState(gattServer ? 'connected' : 'lost');
             saveSessionToStorage();
             const durationText = formatTime(elapsedSeconds);
             sessionButtonRow.hidden = true;

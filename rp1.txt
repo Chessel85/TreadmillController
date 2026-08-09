@@ -1,8 +1,8 @@
 # example running plan file 
 incline:1% Speed:10.0kmh Duration:2min
 incline:1% Speed:12.0kmh Duration:1min
-StartLoop,5
-incline:3% Speed:11.5kmh Duration:0.5min
-incline:0% Speed:5.8kmh Duration:1min
+StartLoop:5
+incline:3% Speed:11.5kmh Duration:30sec
+incline:0% Speed:5.8kmh Duration:1min15sec
 EndLoop
-incline:1% Speed:8.3kmh Duration: 1min
+incline:1% Speed:8.3kmh Duration:25sec
